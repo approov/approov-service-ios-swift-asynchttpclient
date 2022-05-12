@@ -4,6 +4,8 @@
 import PackageDescription
 
 let approovSDKVersion = "3.0.0"
+let bitcode = "-bitcode" // "" or "-bitcode"
+let approovSDKChecksum = "ee9e432bca8060f109d00c04bbd28766dda6a38612d5056d737f54000e01f311"
 let asyncHTTPClientVersion: Version = Version(1, 10, 1)
 
 let package = Package(
@@ -37,7 +39,8 @@ let package = Package(
             exclude: ["README.md", "LICENSE"]),
         .binaryTarget(
             name: "Approov",
-            url: "https://github.com/approov/approov-ios-sdk/releases/download/" + approovSDKVersion + "/Approov.xcframework.zip",
-            checksum : "5ec60ea00e8e10f34ee3c56033f26d78a8076224e89b6968b74bd1325b688653"),
+            url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
+                "/Approov.xcframework.zip",
+            checksum : approovSDKChecksum),
     ]
 )
