@@ -19,7 +19,6 @@ let package = Package(
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
-        // .package(url: /* package url */, from: "1.0.0"),
         .package(url: "https://github.com/approov/async-http-client", from: asyncHTTPClientVersion),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.38.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.14.1"),
@@ -35,8 +34,7 @@ let package = Package(
             name: "ApproovAsyncHTTPClient",
             dependencies: [
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
-            ],
-            exclude: ["README.md", "LICENSE"]),
+            ]),
         .binaryTarget(
             name: "Approov",
             url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
