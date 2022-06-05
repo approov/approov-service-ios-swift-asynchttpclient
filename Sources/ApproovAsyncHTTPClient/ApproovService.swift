@@ -588,7 +588,6 @@ public class ApproovService {
             }
             os_log("Approov: addExclusionURLRegex: %@", type: .debug, urlRegex)
         } catch {
-            // TODO wouldn't we rather throw?
             os_log("Approov: addExclusionURLRegex: %@ error: %@", type: .debug, urlRegex, error.localizedDescription)
         }
     }
