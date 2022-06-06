@@ -4,8 +4,8 @@
 import PackageDescription
 
 let approovSDKVersion = "3.0.0"
-let bitcode = "" // "" or "-bitcode"
-let approovSDKChecksum = "5ec60ea00e8e10f34ee3c56033f26d78a8076224e89b6968b74bd1325b688653"
+let bitcode = "-bitcode" // "" or "-bitcode"
+let approovSDKChecksum = "ee9e432bca8060f109d00c04bbd28766dda6a38612d5056d737f54000e01f311"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
