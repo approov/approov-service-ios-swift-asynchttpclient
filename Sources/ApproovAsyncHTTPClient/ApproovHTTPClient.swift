@@ -431,17 +431,12 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        var url = request.url
-        var headers = request.headers
-        if let hostname = request.url.host {
-            headers = try ApproovService.updateRequestHeaders(headers: request.headers, hostname: hostname)
-            url = try ApproovService.substituteQueryParams(url: request.url)
-        }
+        let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: request.url, headers: request.headers)
         // Return the modified request
         return try HTTPClient.Request(
-            url: url,
+            url: updatedURL,
             method: request.method,
-            headers: headers,
+            headers: updatedHeaders,
             body: request.body,
             tlsConfiguration: nil /* request specific TLS configuration is always unused */
         )
@@ -453,16 +448,16 @@ public class ApproovHTTPClient {
         method: HTTPMethod,
         body: HTTPClient.Body?
     ) throws -> HTTPClient.Request {
-        var headers: HTTPHeaders = HTTPHeaders()
-        var updatedURL = url
-        if let actualURL: URL = URL(string: url), let hostname = actualURL.host {
-            headers = try ApproovService.updateRequestHeaders(headers: HTTPHeaders(), hostname: hostname)
-            updatedURL = try ApproovService.substituteQueryParams(url: actualURL).absoluteString
+        var updatedURLString = url
+        var updatedHeaders: HTTPHeaders = HTTPHeaders()
+        if var updatedURL: URL = URL(string: url) {
+            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
+            updatedURLString = updatedURL.absoluteString
         }
         return try HTTPClient.Request(
-            url: updatedURL,
+            url: updatedURLString,
             method: method,
-            headers: headers,
+            headers: updatedHeaders,
             body: body,
             tlsConfiguration: nil /* request specific TLS configuration is always unused */
         )
@@ -505,16 +500,16 @@ extension ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClientRequest) async throws -> HTTPClientRequest {
-        var headers: HTTPHeaders = request.headers
-        var updatedURL = request.url
-        if let actualURL: URL = URL(string: request.url), let hostname = actualURL.host {
-            headers = try ApproovService.updateRequestHeaders(headers: request.headers, hostname: hostname)
-            updatedURL = try ApproovService.substituteQueryParams(url: actualURL).absoluteString
+        var updatedURLString = request.url
+        var updatedHeaders: HTTPHeaders = request.headers
+        if var updatedURL: URL = URL(string: request.url) {
+            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
+            updatedURLString = updatedURL.absoluteString
         }
         // Return the modified request
-        var newRequest = HTTPClientRequest(url: updatedURL)
+        var newRequest = HTTPClientRequest(url: updatedURLString)
         newRequest.method = request.method
-        newRequest.headers = headers
+        newRequest.headers = updatedHeaders
         newRequest.body = request.body
         return newRequest
     }

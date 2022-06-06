@@ -4,9 +4,9 @@
 import PackageDescription
 
 let approovSDKVersion = "3.0.0"
-let bitcode = "-bitcode" // "" or "-bitcode"
-let approovSDKChecksum = "ee9e432bca8060f109d00c04bbd28766dda6a38612d5056d737f54000e01f311"
-let asyncHTTPClientVersion: Version = Version(1, 10, 1)
+let bitcode = "" // "" or "-bitcode"
+let approovSDKChecksum = "5ec60ea00e8e10f34ee3c56033f26d78a8076224e89b6968b74bd1325b688653"
+let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
     name: "ApproovAsyncHTTPClient",
@@ -19,7 +19,6 @@ let package = Package(
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
-        // .package(url: /* package url */, from: "1.0.0"),
         .package(url: "https://github.com/approov/async-http-client", from: asyncHTTPClientVersion),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.38.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.14.1"),
@@ -35,8 +34,7 @@ let package = Package(
             name: "ApproovAsyncHTTPClient",
             dependencies: [
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
-            ],
-            exclude: ["README.md", "LICENSE"]),
+            ]),
         .binaryTarget(
             name: "Approov",
             url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
