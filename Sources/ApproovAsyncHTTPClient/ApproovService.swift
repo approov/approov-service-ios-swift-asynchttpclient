@@ -276,7 +276,7 @@ public class ApproovService {
         var updatedURL = url
         var updatedHeaders = headers
         if let hostname = url.host {
-            updatedHeaders = try updateRequestHeaders(headers: HTTPHeaders(), hostname: hostname)
+            updatedHeaders = try updateRequestHeaders(headers: headers, hostname: hostname)
             updatedURL = try substituteQueryParams(url: url)
         }
         return (updatedURL, updatedHeaders)
