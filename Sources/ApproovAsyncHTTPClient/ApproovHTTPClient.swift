@@ -486,7 +486,7 @@ extension ApproovHTTPClient {
     ///
     /// - Parameters:
     ///   - request: HTTP request to execute.
-    ///   - timeout: time the the request has to complete.
+    ///   - timeout: time the request has to complete.
     ///   - logger: The logger to use for this request.
     /// - Returns: The response to the request. Note that the `body` of the response may not yet have been fully received.
     public func execute(
