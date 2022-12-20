@@ -33,8 +33,8 @@ let package = Package(
         .target(
             name: "ApproovAsyncHTTPClient",
             dependencies: [
-                .product(name: "AsyncHTTPClient", package: "async-http-client"),
-            ]),
+                .product(name: "AsyncHTTPClient", package: "async-http-client")]
+                ),
         .binaryTarget(
             name: "Approov",
             url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
