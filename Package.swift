@@ -4,8 +4,8 @@
 import PackageDescription
 
 let approovSDKVersion = "3.1.0"
-let bitcode = "" // "" or "-bitcode"
-let approovSDKChecksum = "9514279f8db428f46ecd9c855a89e25f580069e703e2e2940d3aa7a752040232"
+let bitcode = "-bitcode" // "" or "-bitcode"
+let approovSDKChecksum = "git tag 3.1.0-bitcode;git push --tags"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
