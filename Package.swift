@@ -5,7 +5,7 @@ import PackageDescription
 
 let approovSDKVersion = "3.1.0"
 let bitcode = "-bitcode" // "" or "-bitcode"
-let approovSDKChecksum = "git tag 3.1.0-bitcode;git push --tags"
+let approovSDKChecksum = "b1c17d399cc6491ace55833b23378f740439c36bc90afeea3351a76d6839c94e"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
@@ -39,6 +39,7 @@ let package = Package(
             name: "Approov",
             url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
                 "/Approov.xcframework.zip",
-            checksum : approovSDKChecksum),
+            checksum : approovSDKChecksum
+            ),
     ]
 )
