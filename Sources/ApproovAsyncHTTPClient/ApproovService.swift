@@ -304,10 +304,18 @@ public class ApproovService {
                 Approov.setDataHashInToken(aValue)
             }
         }
+
         // Fetch the Approov token
         let result: ApproovTokenFetchResult = Approov.fetchTokenAndWait(hostname)
         os_log("ApproovService: update headers %@: %@", type: .info, hostname, result.loggableToken())
 
+        // Log if a configuration update is received and call fetchConfig to clear the update state
+        if result.isConfigChanged {
+            Approov.fetchConfig()
+            os_log("ApproovService: dynamic configuration update received")
+        }
+
+        // Handle the Approov token fetch response
         var updatedHeaders: HTTPHeaders = [:]
         switch result.status {
         case .success:
