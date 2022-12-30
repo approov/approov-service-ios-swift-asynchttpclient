@@ -572,7 +572,7 @@ extension ApproovHTTPClient {
         }
 
         // Lock for access to internal variables
-        private let lock = Lock()
+        private let lock = NIOLock()
 
         // Indicates whether the task has been cancelled
         private var _isCancelled: Bool = false

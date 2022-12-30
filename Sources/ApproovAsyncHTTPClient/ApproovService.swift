@@ -67,7 +67,7 @@ public class ApproovService {
     fileprivate init(){}
 
     /** Lock to manage intialization */
-    private static let initLock = Lock()
+    private static let initLock = NIOLock()
 
     /** Status of Approov SDK initialisation */
     private static var approovSDKInitialised = false
@@ -98,7 +98,7 @@ public class ApproovService {
                 approovSDKInitialised = true
                 Approov.setUserProperty("approov-service-asynchttpclient")
                 // Set the global Approov pinning verification block for AsyncHTTPClient
-                TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
+                //TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
             } catch let error {
                 // Log error and throw exception
                 let errorMessage = "Error initializing Approov SDK: \(error.localizedDescription)"
@@ -109,7 +109,7 @@ public class ApproovService {
     }
 
     /** Lock to manage variable access */
-    private static let stateLock = Lock()
+    private static let stateLock = NIOLock()
 
     /** True if the interceptor should proceed on network failures and not add an Approov token */
     private static var _proceedOnNetworkFail = false;
