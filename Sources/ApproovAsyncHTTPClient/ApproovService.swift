@@ -98,7 +98,7 @@ public class ApproovService {
                 approovSDKInitialised = true
                 Approov.setUserProperty("approov-service-asynchttpclient")
                 // Set the global Approov pinning verification block for AsyncHTTPClient
-                //TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
+                TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
             } catch let error {
                 // Log error and throw exception
                 let errorMessage = "Error initializing Approov SDK: \(error.localizedDescription)"
