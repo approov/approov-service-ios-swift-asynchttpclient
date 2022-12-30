@@ -594,9 +594,9 @@ public class ApproovService {
             stateLock.withLock {
                 exclusionURLRegexs[urlRegex] = regex
             }
-            os_log("Approov: addExclusionURLRegex: %@", type: .debug, urlRegex)
+            os_log("ApproovService: addExclusionURLRegex: %@", type: .debug, urlRegex)
         } catch {
-            os_log("Approov: addExclusionURLRegex: %@ error: %@", type: .debug, urlRegex, error.localizedDescription)
+            os_log("ApproovService: addExclusionURLRegex: %@ error: %@", type: .debug, urlRegex, error.localizedDescription)
         }
     }
 
@@ -608,7 +608,7 @@ public class ApproovService {
     public static func removeExclusionURLRegex(urlRegex: String) {
         stateLock.withLock {
             if exclusionURLRegexs[urlRegex] != nil {
-                os_log("Approov: removeExclusionURLRegex: %@", type: .debug, urlRegex)
+                os_log("ApproovService: removeExclusionURLRegex: %@", type: .debug, urlRegex)
                 exclusionURLRegexs.removeValue(forKey: urlRegex)
             }
         }

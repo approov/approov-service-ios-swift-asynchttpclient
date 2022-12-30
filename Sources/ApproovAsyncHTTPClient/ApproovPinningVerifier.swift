@@ -84,7 +84,7 @@ public class ApproovPinningVerifier {
                 let isPinned = try ApproovPinningVerifier.verifyPinning(hostname: serverName, certChain: certChain)
                 return isPinned
             } catch {
-                os_log("Approov: Pinning rejection for %@. %@", type: .error, serverName, error.localizedDescription)
+                os_log("ApproovService: Pinning rejection for %@. %@", type: .error, serverName, error.localizedDescription)
                 return false
             }
         } else {
