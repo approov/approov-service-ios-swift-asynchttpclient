@@ -3,9 +3,8 @@
 
 import PackageDescription
 
-let approovSDKVersion = "3.1.0"
-let bitcode = "" // "" or "-bitcode"
-let approovSDKChecksum = "9514279f8db428f46ecd9c855a89e25f580069e703e2e2940d3aa7a752040232"
+let approovSDKVersion = "3.2.0"
+let approovSDKChecksum = "c851f845bacfa3c978d12dbf85d7688a3b93e8e25d01f03784fdcb15b8d2beb0"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
@@ -37,8 +36,7 @@ let package = Package(
                 ),
         .binaryTarget(
             name: "Approov",
-            url: "https://github.com/approov/approov-ios-sdk" + bitcode + "/releases/download/" + approovSDKVersion +
-                "/Approov.xcframework.zip",
+            url: "https://github.com/approov/approov-ios-sdk/releases/download/" + approovSDKVersion + "/Approov.xcframework.zip",
             checksum : approovSDKChecksum
             ),
     ]
