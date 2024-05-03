@@ -3,8 +3,8 @@
 
 import PackageDescription
 
-let approovSDKVersion = "3.2.0"
-let approovSDKChecksum = "c851f845bacfa3c978d12dbf85d7688a3b93e8e25d01f03784fdcb15b8d2beb0"
+let approovSDKVersion = "3.2.2"
+let approovSDKChecksum = "37ecded23807af9a9720018201f2e25a43e388cb4d78b15e78cd3f85c6b0682b"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
