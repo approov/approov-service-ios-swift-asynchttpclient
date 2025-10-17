@@ -1,3 +1,4 @@
 .swiftpm
 Package.resolved
 .DS_Store
+.build/
