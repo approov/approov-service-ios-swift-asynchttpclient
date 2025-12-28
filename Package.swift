@@ -3,8 +3,7 @@
 
 import PackageDescription
 
-let approovSDKVersion = "3.5.0"
-let approovSDKChecksum = "c2902922d07df7cdc74b4b5ec70353bfc88339baee7dd94556170c565731da01"
+let approovSDKVersion = "3.5.3"
 let asyncHTTPClientVersion: Version = Version(1, 10, 2)
 
 let package = Package(
@@ -15,6 +14,7 @@ let package = Package(
         .library(
             name: "ApproovAsyncHTTPClient",
             targets: ["ApproovAsyncHTTPClient", "Approov"]),
+        .package(url: "https://github.com/approov/approov-ios-sdk.git", from: approovSDKVersion)
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
@@ -32,12 +32,9 @@ let package = Package(
         .target(
             name: "ApproovAsyncHTTPClient",
             dependencies: [
-                .product(name: "AsyncHTTPClient", package: "async-http-client")]
-                ),
-        .binaryTarget(
-            name: "Approov",
-            url: "https://github.com/approov/approov-ios-sdk/releases/download/" + approovSDKVersion + "/Approov.xcframework.zip",
-            checksum : approovSDKChecksum
-            ),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "Approov", package: "approov-ios-sdk")
+            ]
+        ),
     ]
 )
