@@ -13,8 +13,7 @@ let package = Package(
         // Products define the executables and libraries a package produces, and make them visible to other packages.
         .library(
             name: "ApproovAsyncHTTPClient",
-            targets: ["ApproovAsyncHTTPClient", "Approov"]),
-        .package(url: "https://github.com/approov/approov-ios-sdk.git", from: approovSDKVersion)
+            targets: ["ApproovAsyncHTTPClient", "Approov"])
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
@@ -25,6 +24,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.10.0"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.11.4"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.4.0"),
+        .package(url: "https://github.com/approov/approov-ios-sdk.git", from: approovSDKVersion)
     ],
     targets: [
         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
