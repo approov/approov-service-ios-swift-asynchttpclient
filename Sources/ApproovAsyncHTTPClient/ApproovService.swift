@@ -848,4 +848,31 @@ public class ApproovService {
         }
     }
 
+    /**
+     * Gets the last ARC (Attestation Response Code) code.
+     *
+     * NOTE: You MUST only call this method upon succesfull attestation completion. Any networking
+     * errors returned from the service layer will not return a meaningful ARC code if the method is called!!!
+     * @return String ARC from last attestation request or empty string if network unavailable
+     */
+    public static func getLastARC() -> String {
+        // We have to get the current config and obtain one protected API endpoint at least
+        // get the dynamic pins from Approov
+        guard let approovPins = Approov.getPins("public-key-sha256") else {
+            os_log("ApproovService: no host pinning information available", type: .error)
+            return ""
+        }
+        // The approovPins contains a map of hostnames to pin strings. We need to skip the '*' entry (Managed Trust Roots),
+        // and use another hostname if available.
+        if let hostname = approovPins.keys.first(where: { $0 != "*" }) {
+            let result = Approov.fetchTokenAndWait(hostname)
+            // Check if a token was fetched successfully and return its arc code
+            if result.token.count > 0 {
+                return result.arc
+            }
+        }
+        os_log("ApproovService: ARC code unavailable", type: .info)
+        return ""
+    }
+
 }
