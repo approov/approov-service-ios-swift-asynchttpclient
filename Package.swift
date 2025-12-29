@@ -17,7 +17,7 @@ let package = Package(
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
-        .package(url: "https://github.com/approov/async-http-client", from: asyncHTTPClientVersion),
+        .package(url: "https://github.com/approov/async-http-client", from: "1.10.2"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.38.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.14.1"),
         .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.19.0"),
