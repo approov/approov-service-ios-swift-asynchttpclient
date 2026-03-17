@@ -76,35 +76,45 @@ public class ApproovService {
      * Note the initializer function should only ever be called once. Subsequent calls will be ignored
      * since the ApproovSDK can only be intialized once; if however, an attempt is made to initialize
      * with a different configuration (config) we throw an ApproovError.configurationError.
-     * If the Approov SDk fails to be initialized for some other reason, an .initializationFailure is raised.
-     * The configuration string is obtained using `approov sdk -getConfigString` or through an Approov onboarding email.
+     * If the underlying SDK has already been initialized by another service layer then the SDK error
+     * is logged and ignored. If the Approov SDk fails to be initialized for some other reason, an
+     * .initializationFailure is raised. The configuration string is obtained using `approov sdk -getConfigString`
+     * or through an Approov onboarding email.
+     *
+     * @param config is the configuration to be used
+     * @param comment is an optional comment to be passed to the SDK
      */
-    public static func initialize(config: String) throws {
+    public static func initialize(config: String, comment: String? = nil) throws {
         try initLock.withLock {
             // Check if we attempt to use a different configString
-            if (approovSDKInitialised) {
-                if (config != approovConfigString) {
+            if approovSDKInitialised && ((comment?.hasPrefix("reinit")) == nil) {
+                if config != approovConfigString {
                     // Throw exception indicating we are attempting to use different config
                     let errorMessage = "Attempting to initialize with different configuration"
                     os_log("ApproovService: %@", type: .error, errorMessage)
                     throw ApproovError.configurationError(message: errorMessage)
                 }
+                os_log("ApproovService: Ignoring multiple ApproovService layer initializations with the same config")
                 return
             }
             // Initialize Approov SDK
             do {
-                try Approov.initialize(config, updateConfig: "auto", comment: nil)
-                approovConfigString = config
-                approovSDKInitialised = true
-                Approov.setUserProperty("approov-service-asynchttpclient")
-                // Set the global Approov pinning verification block for AsyncHTTPClient
-                TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
-            } catch let error {
-                // Log error and throw exception
-                let errorMessage = "Error initializing Approov SDK: \(error.localizedDescription)"
-                os_log("ApproovService: %@", type: .error, errorMessage)
-                throw ApproovError.initializationFailure(message: errorMessage)
+                try Approov.initialize(config, updateConfig: "auto", comment: comment)
+            } catch {
+                let nsError = error as NSError
+                if nsError.code == 0, nsError.domain == "Foundation._GenericObjCError" {
+                    os_log("ApproovService: Ignoring initialization error in Approov SDK: %@", type: .error, nsError.localizedDescription)
+                } else {
+                    let errorMessage = "Error initializing Approov SDK: \(nsError.localizedDescription)"
+                    os_log("ApproovService: %@", type: .error, errorMessage)
+                    throw ApproovError.initializationFailure(message: errorMessage)
+                }
             }
+            approovConfigString = config
+            approovSDKInitialised = true
+            Approov.setUserProperty("approov-service-asynchttpclient")
+            // Set the global Approov pinning verification block for AsyncHTTPClient
+            TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
         }
     }
 
