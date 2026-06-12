@@ -1,28 +1,29 @@
 # Usage
 
-This document describes the features and functionality of the Approov Service for AsyncHTTPClient. It explains how to initialize the service, use the `ApproovHTTPClient` wrapper for protected requests, and configure optional features such as token binding, secure string substitution, exclusion rules, and direct SDK helper calls. For a basic integration example, please refer to the [Quickstart guide](https://github.com/approov/quickstart-ios-swift-asynchttpclient).
+This document describes the features and functionality of the Approov Service for AsyncHTTPClient. It explains how to initialize the service, use the `ApproovHTTPClient` wrapper for protected requests, and configure optional features such as token binding, secure string substitution, exclusion rules, custom service mutators, and HTTP message signing. For a basic integration example, please refer to the [Quickstart guide](https://github.com/approov/quickstart-ios-swift-asynchttpclient).
 
 ## Swift Package Manager Import
 
 ```swift
 import ApproovAsyncHTTPClient
-import Approov
 ```
 
 ## Basic Integration
 
-For most integrations you initialize `ApproovService` once at app startup and then create an `ApproovHTTPClient` for your protected HTTP traffic.
+For most integrations, you initialize `ApproovService` once at app startup and then create an `ApproovHTTPClient` for your protected HTTP traffic.
 
 ```swift
 import ApproovAsyncHTTPClient
 import AsyncHTTPClient
 import NIOPosix
 
+// Initialize the Approov service
 try ApproovService.initialize(config: "<config-string>")
 
 let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 let client = ApproovHTTPClient(eventLoopGroupProvider: .shared(group))
 
+// Perform a request - Approov token, substitutions, and pinning are applied automatically
 let response = try client.get(url: "https://api.example.com/hello").wait()
 print(response.status)
 
@@ -32,155 +33,178 @@ try group.syncShutdownGracefully()
 
 The wrapper automatically applies Approov token fetching, secure string substitutions, and dynamic pinning to requests it processes.
 
-## Manual Request Protection
+## Empty Config Initialization
 
-If you need lower-level control, you can update a URL and headers yourself before sending the request through your own AsyncHTTPClient flow.
+You can initialize the `ApproovService` with an empty configuration string if you want to use the service layer without active Approov protection. This is useful when you want to bypass Approov processing (e.g., during development or testing against local staging environments).
 
 ```swift
-import ApproovAsyncHTTPClient
-import NIOHTTP1
-
-let url = URL(string: "https://api.example.com/v1/data?api_key=api-key-placeholder")!
-var headers = HTTPHeaders()
-headers.add(name: "Api-Key", value: "api-key-placeholder")
-
-let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: url, headers: headers)
+// Initialize with an empty string to operate in bypass mode
+try? ApproovService.initialize(config: "")
 ```
 
-`updateRequest(url:headers:)` is a blocking call and should not be made on the main/UI thread.
+When initialized with an empty configuration, the service layer operates as a plain pass-through. It will not perform token injection, message signing, secure string substitution, or dynamic pinning. You can enable full Approov protection later in the application lifecycle by calling `ApproovService.initialize(config: config)` with a valid configuration string.
+
+---
+
+# Approov Service Mutator
+
+The `ApproovServiceMutator` protocol allows you to customize the behavior of the Approov service layer at key points in the request lifecycle. By implementing a custom mutator, you can override specific methods to tailor the handling of attestations, network failures, and requests while retaining the default behavior for other cases.
+
+## Why Use a Mutator?
+
+- Centralize app-specific policy without modifying the library source code.
+- Add telemetry/logging on rejections or network failures.
+- Skip Approov processing for specific hosts or endpoints.
+- Customize pinning decisions per request.
+- Adjust behavior when token or secure string fetches fail.
+- Implement HTTP message signing.
 
 ## Default Behavior
 
-By default, the `ApproovService` processes requests based on the attestation status returned by the SDK. A successful fetch adds the configured Approov token header, and secure string substitutions are applied only when it is safe to continue.
+By default, the `ApproovService` processes requests based on the attestation status. The default behavior is summarized in the table below:
 
 | Approov Fetch Status | Action | Result |
 | :--- | :--- | :--- |
 | **Success** | Proceed | The request is sent with the configured Approov token header. |
-| **No Network / Poor Network / MitM Detected** | Throw Exception | An `ApproovError.networkingError` is thrown unless `proceedOnNetworkFail` is enabled. |
-| **No Approov Service / Unknown URL / Unprotected URL** | Proceed | The request is sent without an Approov token. |
-| **Rejected / Other Permanent Errors** | Throw Exception | An `ApproovError.rejectionError` or `ApproovError.permanentError` is thrown. |
+| **No Network / Poor Network / MITM Detected** | Throw Exception | An `ApproovError.networkingError` is thrown. The request is marked as `.ShouldRetry`. |
+| **Rejection** | Throw Exception | An `ApproovError.rejectionError` is thrown. The request is marked as `.ShouldFail`. |
+| **No Approov Service / Unknown URL** | Proceed | The request is sent **without** an `Approov-Token`. |
 
-## Multiple Service Layers
+## Customizing Request Handling with Mutators
 
-It is possible to use more than one Approov service layer in the same app, for example the AsyncHTTPClient and URLSession packages together. The underlying Approov SDK can only be initialized once, so if another service layer later calls `ApproovService.initialize(...)` with the same configuration, the duplicate SDK initialization is detected and ignored.
+You may want to modify this behavior to suit specific app requirements. A common use case is handling network failures or enforcing strict token presence.
 
-In that case you may see a log entry similar to:
+### Example: Enforcing Token Presence (Block on NO_APPROOV_SERVICE)
 
-```text
-ApproovService: Ignoring initialization error in Approov SDK: The operation couldn’t be completed. (Foundation._GenericObjCError error 0.)
-```
-
-This log is informational only. Execution continues and this condition is not surfaced as an exception. If a later initialization attempts to use a different configuration, that is still treated as a real configuration error.
-
-## Reinitialization with a Comment
-
-If you call `ApproovService.initialize(config:comment:)` with a non-`nil` comment, the service layer allows the initialization call to reach the underlying SDK again. This is useful for SDK options such as comments beginning with `reinit:` that trigger internal SDK reconfiguration.
-
-```swift
-try ApproovService.initialize(config: "<config-string>", comment: "reinit:example-option")
-```
-
-## Proceed on Network Failure
-
-By default, transient network issues prevent the protected request from being sent because the app cannot safely obtain a token or secure strings. If you prefer to let requests continue without the Approov token in those cases, set:
-
-```swift
-ApproovService.proceedOnNetworkFail = true
-```
-
-Use this with caution because it may allow traffic to proceed before dynamic pins have been refreshed.
-
-## Token Binding
-
-[Token Binding](https://ext.approov.io/docs/latest/approov-usage-documentation/#token-binding) allows you to bind the Approov token to a specific header value, such as an OAuth token or session identifier.
-
-```swift
-ApproovService.bindHeader = "Authorization"
-```
-
-If the binding header value changes, the SDK automatically invalidates the previous Approov token and fetches a new one on the next protected request.
-
-## Custom Approov Token Header
-
-By default, the token is added as `Approov-Token` with no prefix. You can override both the header name and an optional prefix.
-
-```swift
-ApproovService.approovTokenHeaderAndPrefix = (
-    approovTokenHeader: "Authorization",
-    approovTokenPrefix: "Bearer "
-)
-```
-
-## Secure String Header Substitution
-
-Header substitution lets you use placeholder values in headers and have them replaced with secure strings fetched from Approov.
-
-```swift
-ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
-ApproovService.addSubstitutionHeader(header: "Authorization", prefix: "Bearer ")
-```
-
-Once configured, any matching header value is treated as a secure string lookup key.
-
-## Secure String Query Parameter Substitution
-
-Query parameter substitution works similarly for URL query values.
-
-```swift
-ApproovService.addSubstitutionQueryParam(key: "api_key")
-```
-
-For example, a request like `https://api.example.com?api_key=my-placeholder` can have `my-placeholder` replaced with the secure string value returned by Approov.
-
-## Exclusion URL Regexes
-
-You can exclude selected URLs from all Approov processing.
-
-```swift
-ApproovService.addExclusionURLRegex(urlRegex: "^https://example\.com/public/.*$")
-```
-
-This should be used with extreme caution because excluded requests do not create a path for refreshing dynamic pins.
-
-## Dynamic Pinning
-
-Dynamic certificate pinning is enabled automatically during `ApproovService.initialize(...)`. The service layer installs `ApproovPinningVerifier.verifyPinning` into AsyncHTTPClient's TLS configuration so protected hosts can be verified against the latest Approov-managed pins.
-
-For advanced integrations, the verifier is also available directly if you need to wire it into custom TLS handling.
-
-## Direct SDK Helper Calls
-
-The service layer also exposes direct helper methods for specific workflows:
-
-- `try ApproovService.precheck()` to see whether the current app instance is likely to pass attestation.
-- `let token = try ApproovService.fetchToken(url: "https://api.example.com")` when you need a token outside the normal request flow.
-- `let value = try ApproovService.fetchSecureString(key: "api-key", newDef: nil)` to fetch or define secure strings.
-- `let jwt = try ApproovService.fetchCustomJWT(payload: "{\"claim\":true}")` to fetch a custom JWT.
-- `let signature = try ApproovService.getMessageSignature(message: "example-message")` for account message signing when enabled in the Approov account.
-- `let arc = ApproovService.getLastARC()` to retrieve the last Attestation Response Code when meaningful.
-
-## Real-World Pattern
-
-A common pattern is to initialize once, configure binding and substitutions, and then reuse a single `ApproovHTTPClient` instance for all protected traffic.
+The default behavior for statuses like `NO_APPROOV_SERVICE` is to proceed with the request without adding an Approov token. If you want to ensure that *only* requests with valid proof of attestation reach your backend API, you can enforce this with a custom mutator:
 
 ```swift
 import ApproovAsyncHTTPClient
-import AsyncHTTPClient
-import NIOHTTP1
-import NIOPosix
+import Approov
 
-try ApproovService.initialize(config: "<config-string>")
-ApproovService.bindHeader = "Authorization"
-ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
-ApproovService.addSubstitutionQueryParam(key: "api_key")
+final class EnforceTokenMutator: ApproovServiceMutator {
+    func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        // If the service is not available, do not proceed.
+        // We throw a networking error to trigger a retry.
+        if approovResults.status == .noApproovService {
+            throw ApproovError.networkingError(message: "Approov service unavailable. Will attempt connection again.")
+        }
 
-let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-let client = ApproovHTTPClient(eventLoopGroupProvider: .shared(group))
+        // For all other statuses, use the default behavior.
+        return try ApproovServiceMutatorDefault.shared.handleInterceptorFetchTokenResult(approovResults, url: url)
+    }
+}
 
-var request = try HTTPClient.Request(url: "https://api.example.com/v1/data?api_key=my-key", method: .GET)
-request.headers.add(name: "Authorization", value: "Bearer <oauth-token>")
-request.headers.add(name: "Api-Key", value: "my-key")
-
-let response = try client.execute(request: request).wait()
-print(response.status)
+// Install the mutator
+ApproovService.setServiceMutator(EnforceTokenMutator())
 ```
+
+### Example: Customizing Requests (Add Metadata Headers)
+
+You can override `handleInterceptorProcessedRequest` to add additional headers or modify the request after Approov has processed it.
+
+```swift
+final class MyMutator: ApproovServiceMutator {
+    func handleInterceptorProcessedRequest(_ request: ApproovRequest,
+                                           changes: ApproovRequestMutations) throws -> ApproovRequest {
+        var req = request
+        req.headers.replaceOrAdd(name: "Client-Platform", value: "ios")
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            req.headers.replaceOrAdd(name: "App-Version", value: version)
+        }
+        return req
+    }
+}
+```
+
+---
+
+# Message Signing
+
+It is possible to sign HTTP requests using Approov to ensure message integrity and authenticity. There are two types of message signing available:
+
+1.  **Installation Message Signing**: Uses an installation-specific key (held in the device's Secure Enclave) to sign requests. This provides strong non-repudiation as the signing key is unique to that specific installation and never leaves the device.
+2.  **Account Message Signing**: Uses a shared account-specific secret key (HMAC-SHA256) to sign requests. This key is delivered to the SDK only upon successful attestation.
+
+By default, the `ApproovService` uses the class `ApproovServiceMutatorDefault`, which does no message signing. Even if you install `ApproovDefaultMessageSigning`, a signature is only added when:
+- The request already has an `Approov-Token` header.
+- A `SignatureParametersFactory` is configured (default or host-specific).
+
+## Enable Message Signing with Default Settings
+
+```swift
+let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
+ApproovService.setServiceMutator(signer)
+```
+
+## Custom Message Signing Parameters
+
+```swift
+let factory = SignatureParametersFactory()
+    .setUseAccountMessageSigning() // or setUseInstallMessageSigning()
+    .setAddCreated(true)
+    .setExpiresLifetime(60)
+
+let signer = ApproovDefaultMessageSigning()
+    .setDefaultFactory(factory)
+    .putHostFactory(hostName: "api.example.com", factory: factory)
+
+ApproovService.setServiceMutator(signer)
+```
+
+---
+
+# Token Binding
+
+Token Binding allows you to bind the Approov token to a specific piece of data, such as an OAuth token or a user session identifier.
+
+```swift
+// Bind the Approov token to the Authorization header
+ApproovService.bindHeader = "Authorization"
+```
+
+If the value of the binding header changes (e.g., a new OAuth token is received), the SDK automatically invalidates the current Approov token and fetches a new one with the updated binding on the next request.
+
+---
+
+# Use Approov Status as Token
+
+If an actual token cannot be obtained, you can configure the service to send the Approov fetch status (e.g., `NO_NETWORK`, `MITM_DETECTED`, `NO_APPROOV_SERVICE`) as the token header value. This allows your backend to distinguish between different failure reasons.
+
+```swift
+// Enable status-as-token injection
+ApproovService.setUseApproovStatusIfNoToken(shouldUse: true)
+```
+
+To ensure the request actually proceeds to the backend on these failure paths, you must use a custom `ApproovServiceMutator` that returns `true` for these statuses:
+
+```swift
+final class StatusAsTokenMutator: ApproovServiceMutator {
+    func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        let status = approovResults.status
+        if status == .mitmDetected || status == .noApproovService || status == .success {
+            return true
+        }
+        return try ApproovServiceMutatorDefault.shared.handleInterceptorFetchTokenResult(approovResults, url: url)
+    }
+}
+ApproovService.setServiceMutator(StatusAsTokenMutator())
+```
+
+---
+
+# Logging
+
+You can customize the log level emitted by the `ApproovService` using the static property `loggingLevel`:
+
+```swift
+ApproovService.loggingLevel = .debug
+```
+
+Available levels are:
+*   `.off`: Disables all logging from the `ApproovService` package.
+*   `.error`: Only logs critical errors.
+*   `.warning`: Logs warnings and errors.
+*   `.info` (Default): Logs informative events, configuration receipts, and token states.
+*   `.debug`: Logs highly verbose tracing information.

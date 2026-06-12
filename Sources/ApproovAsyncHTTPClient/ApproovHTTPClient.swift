@@ -21,6 +21,7 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
 import NIOHTTPCompression
 import NIOPosix
@@ -431,15 +432,47 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: request.url, headers: request.headers)
-        // Return the modified request
-        return try HTTPClient.Request(
-            url: updatedURL,
-            method: request.method,
-            headers: updatedHeaders,
-            body: request.body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
+        var bodyData: Data? = nil
+        if let requestBody = request.body {
+            let eventLoop = EmbeddedEventLoop()
+            let writer = HTTPClient.Body.StreamWriter { ioData in
+                switch ioData {
+                case .byteBuffer(let buffer):
+                    bodyData = buffer.getData(at: 0, length: buffer.readableBytes)
+                default:
+                    break
+                }
+                return eventLoop.makeSucceededFuture(())
+            }
+            _ = requestBody.stream(writer)
+        }
+        
+        let approovReq = ApproovRequest(
+            url: request.url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            body: bodyData
         )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            return try HTTPClient.Request(
+                url: response.request.url,
+                method: request.method,
+                headers: response.request.headers,
+                body: request.body,
+                tlsConfiguration: request.tlsConfiguration
+            )
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        }
     }
 
     /// Update a request for Approov
@@ -448,19 +481,50 @@ public class ApproovHTTPClient {
         method: HTTPMethod,
         body: HTTPClient.Body?
     ) throws -> HTTPClient.Request {
-        var updatedURLString = url
-        var updatedHeaders: HTTPHeaders = HTTPHeaders()
-        if var updatedURL: URL = URL(string: url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+        guard let reqURL = URL(string: url) else {
+            throw HTTPClientError.invalidURL
         }
-        return try HTTPClient.Request(
-            url: updatedURLString,
-            method: method,
-            headers: updatedHeaders,
-            body: body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
+        var bodyData: Data? = nil
+        if let requestBody = body {
+            let eventLoop = EmbeddedEventLoop()
+            let writer = HTTPClient.Body.StreamWriter { ioData in
+                switch ioData {
+                case .byteBuffer(let buffer):
+                    bodyData = buffer.getData(at: 0, length: buffer.readableBytes)
+                default:
+                    break
+                }
+                return eventLoop.makeSucceededFuture(())
+            }
+            _ = requestBody.stream(writer)
+        }
+        
+        let approovReq = ApproovRequest(
+            url: reqURL,
+            method: method.rawValue,
+            headers: HTTPHeaders(),
+            body: bodyData
         )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            return try HTTPClient.Request(
+                url: response.request.url,
+                method: method,
+                headers: response.request.headers,
+                body: body,
+                tlsConfiguration: nil
+            )
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
+        }
     }
 }
 
@@ -500,18 +564,34 @@ extension ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClientRequest) async throws -> HTTPClientRequest {
-        var updatedURLString = request.url
-        var updatedHeaders: HTTPHeaders = request.headers
-        if var updatedURL: URL = URL(string: request.url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+        guard let url = URL(string: request.url) else {
+            throw HTTPClientError.invalidURL
         }
-        // Return the modified request
-        var newRequest = HTTPClientRequest(url: updatedURLString)
-        newRequest.method = request.method
-        newRequest.headers = updatedHeaders
-        newRequest.body = request.body
-        return newRequest
+        
+        let approovReq = ApproovRequest(
+            url: url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            body: nil // Request body is streaming/AsyncSequence, skip digestion
+        )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            var newRequest = HTTPClientRequest(url: response.request.url.absoluteString)
+            newRequest.method = request.method
+            newRequest.headers = response.request.headers
+            newRequest.body = request.body
+            return newRequest
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        }
     }
 }
 
