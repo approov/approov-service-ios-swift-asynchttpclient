@@ -1066,33 +1066,36 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     func testMessageSerializationFailures() throws {
         try reinitializeServiceWithTargetHost()
-        
+
         let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
             .setUseInstallMessageSigning()
-        // Force a required body digest but provide a non-repeatable stream body that cannot be digested
+        // Require a body digest, then provide a one-shot streaming body that the service layer cannot
+        // buffer. The required digest must fail closed during request processing.
         _ = try? factory.setBodyDigestConfig("sha-256", required: true)
-        
+
         let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
         ApproovService.setServiceMutator(signer)
-        
-        // Create a non-repeatable stream body
-        var called = false
-        let requestBody = HTTPClient.Body.stream(length: 10) { writer in
-            if called {
-                return EmbeddedEventLoop().makeFailedFuture(ApproovError.permanentError(message: "Stream exhausted"))
-            }
-            called = true
-            return writer.write(.byteBuffer(ByteBuffer(string: "non-repeat")))
+
+        // A chunked/one-shot streaming body (no declared length) is not buffered by body extraction, so
+        // a required Content-Digest cannot be produced and signing must fail closed at request-processing
+        // time — before the request is ever sent. The stream closure writes via the provided writer
+        // (never returning a future from an undriven EmbeddedEventLoop); here it is not invoked at all
+        // because the body is intentionally skipped.
+        let requestBody = HTTPClient.Body.stream(length: nil) { writer in
+            writer.write(.byteBuffer(ByteBuffer(string: "non-repeat")))
         }
-        
+
         let request = try HTTPClient.Request(url: targetURLString, method: .POST, body: requestBody)
         let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
         defer {
             try? client.syncShutdown()
         }
-        
+
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
-            XCTAssertNotNil(error)
+            guard case ApproovError.permanentError = error else {
+                XCTFail("Expected ApproovError.permanentError for a required digest that cannot be created, got \(error)")
+                return
+            }
         }
     }
 
