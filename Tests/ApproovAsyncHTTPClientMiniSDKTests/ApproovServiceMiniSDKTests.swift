@@ -175,6 +175,26 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNotNil(payload["exp"] as? NSNumber)
     }
 
+    func testFetchTokenWrapsNonApproovMutatorErrorAsApproovError() throws {
+        // A custom mutator may throw an arbitrary Error; the public fetchToken contract documents
+        // ApproovError, so such errors must be wrapped rather than escaping as a foreign type.
+        struct CustomMutatorError: Error {}
+        struct ThrowingMutator: ApproovServiceMutator {
+            func handleFetchTokenResult(_ approovResults: ApproovTokenFetchResult) throws {
+                throw CustomMutatorError()
+            }
+        }
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(ThrowingMutator())
+
+        XCTAssertThrowsError(try ApproovService.fetchToken(url: targetURLString)) { error in
+            guard case ApproovError.permanentError = error else {
+                XCTFail("Expected ApproovError.permanentError, got \(type(of: error)): \(error)")
+                return
+            }
+        }
+    }
+
     func testUpdateRequestNoApproovServiceProceedsWithoutToken() throws {
         try reinitializeServiceWithTargetHost()
         setDirective(

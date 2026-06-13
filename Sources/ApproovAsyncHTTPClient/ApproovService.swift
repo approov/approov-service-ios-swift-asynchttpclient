@@ -260,6 +260,41 @@ public class ApproovService {
     }
 
     /**
+     * Logs that an Approov-dependent method was invoked while the platform SDK is not active,
+     * distinguishing "initialized in bypass mode (empty config)" from "service layer not initialized
+     * at all" so the two states can be told apart in the logs.
+     */
+    private static func logApproovUnavailable(_ method: String) {
+        guard loggingLevel >= .error else {
+            return
+        }
+        let (initialized, enabled) = initLock.withLock {
+            (approovSDKInitialised, isApproovEnabledInternal)
+        }
+        if initialized && !enabled {
+            os_log("ApproovService: %@: Approov is disabled (initialized in bypass mode); ignoring call",
+                   type: .error, method)
+        } else {
+            os_log("ApproovService: %@: service layer not initialized", type: .error, method)
+        }
+    }
+
+    /**
+     * Runs a throwing operation (typically a service mutator callback) and guarantees that any error
+     * escaping is an `ApproovError`. A custom mutator may throw an arbitrary `Error`; this wraps such
+     * values as `ApproovError.permanentError` so the documented public throwing contract holds.
+     */
+    private static func wrappingApproovError<T>(_ context: String, _ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch let error as ApproovError {
+            throw error
+        } catch {
+            throw ApproovError.permanentError(message: "\(context): \(error.localizedDescription)")
+        }
+    }
+
+    /**
      * Sets a flag indicating if the network interceptor should proceed anyway if it is
      * not possible to obtain an Approov token due to a networking failure.
      */
@@ -343,9 +378,7 @@ public class ApproovService {
      */
     public static func setDevKey(devKey: String) {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: setDevKey: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("setDevKey")
             return
         }
         Approov.setDevKey(devKey)
@@ -494,7 +527,9 @@ public class ApproovService {
             return nil
         }
         if (ProcessInfo.processInfo.systemUptime - time) < failureCacheTTL {
-            os_log("ApproovService: using cached failure: %@", type: .debug, Approov.string(from: result.status))
+            if loggingLevel >= .debug {
+                os_log("ApproovService: using cached failure: %@", type: .debug, Approov.string(from: result.status))
+            }
             return result
         }
         cachedFailureResult = nil
@@ -669,8 +704,8 @@ public class ApproovService {
         for (header, prefix) in subsHeadersCopy {
             if let value = allHeaders.first(name: header) {
                 if ((value.hasPrefix(prefix)) && (value.count > prefix.count)) {
-                    let index = prefix.index(prefix.startIndex, offsetBy: prefix.count)
-                    let approovResults = Approov.fetchSecureStringAndWait(String(value.suffix(from:index)), nil)
+                    let lookupKey = String(value.dropFirst(prefix.count))
+                    let approovResults = Approov.fetchSecureStringAndWait(lookupKey, nil)
                     if loggingLevel >= .info {
                         os_log("ApproovService: Substituting header: %@, %@", type: .info, header, Approov.string(from: approovResults.status))
                     }
@@ -853,8 +888,11 @@ public class ApproovService {
                     os_log("ApproovService: addExclusionURLRegex: %@", type: .debug, urlRegex)
                 }
             } catch {
-                if _loggingLevel >= .debug {
-                    os_log("ApproovService: addExclusionURLRegex: %@ error: %@", type: .debug, urlRegex, error.localizedDescription)
+                // The pattern was rejected and no exclusion was registered; surface this at error
+                // level so callers are not left believing an invalid regex took effect.
+                if _loggingLevel >= .error {
+                    os_log("ApproovService: addExclusionURLRegex: %@ rejected, exclusion NOT added: %@",
+                           type: .error, urlRegex, error.localizedDescription)
                 }
             }
         }
@@ -883,9 +921,7 @@ public class ApproovService {
      */
     public static func getDeviceID() -> String? {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: getDeviceID: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("getDeviceID")
             return nil
         }
         let deviceID = Approov.getDeviceID()
@@ -902,9 +938,7 @@ public class ApproovService {
      */
     public static func setDataHashInToken(data: String) {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: setDataHashInToken: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("setDataHashInToken")
             return
         }
         if loggingLevel >= .debug {
@@ -918,16 +952,16 @@ public class ApproovService {
      */
     public static func fetchToken(url: String) throws -> String {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: fetchToken: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("fetchToken")
             throw ApproovError.permanentError(message: "fetchToken: SDK not initialized")
         }
         let result = Approov.fetchTokenAndWait(url)
         if loggingLevel >= .debug {
             os_log("ApproovService: fetchToken: %@", type: .debug, Approov.string(from: result.status))
         }
-        try getServiceMutator().handleFetchTokenResult(result)
+        try wrappingApproovError("fetchToken") {
+            try getServiceMutator().handleFetchTokenResult(result)
+        }
         return result.token
     }
 
@@ -936,9 +970,7 @@ public class ApproovService {
      */
     public static func setInstallAttrsInToken(attrs: String) throws {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: setInstallAttrsInToken: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("setInstallAttrsInToken")
             throw ApproovError.permanentError(message: "setInstallAttrsInToken: SDK not initialized")
         }
         Approov.setInstallAttrsInToken(attrs)
@@ -952,9 +984,7 @@ public class ApproovService {
      */
     public static func getAccountMessageSignature(message: String) -> String? {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: getAccountMessageSignature: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("getAccountMessageSignature")
             return nil
         }
         return Approov.getMessageSignature(message)
@@ -965,9 +995,7 @@ public class ApproovService {
      */
     public static func getInstallMessageSignature(message: String) -> String? {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: getInstallMessageSignature: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("getInstallMessageSignature")
             return nil
         }
         return Approov.getInstallMessageSignature(message)
@@ -989,9 +1017,7 @@ public class ApproovService {
      */
     public static func fetchSecureString(key: String, newDef: String?) throws -> String? {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: fetchSecureString: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("fetchSecureString")
             throw ApproovError.permanentError(message: "fetchSecureString: SDK not initialized")
         }
         let type = newDef != nil ? "definition" : "lookup"
@@ -999,7 +1025,9 @@ public class ApproovService {
         if loggingLevel >= .info {
             os_log("ApproovService: fetchSecureString: %@: %@", type: .info, type, Approov.string(from: approovResult.status))
         }
-        try getServiceMutator().handleFetchSecureStringResult(approovResult, operation: type, key: key)
+        try wrappingApproovError("fetchSecureString \(type) for \(key)") {
+            try getServiceMutator().handleFetchSecureStringResult(approovResult, operation: type, key: key)
+        }
         return approovResult.secureString
     }
 
@@ -1008,16 +1036,16 @@ public class ApproovService {
      */
     public static func fetchCustomJWT(payload: String) throws -> String {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: fetchCustomJWT: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("fetchCustomJWT")
             throw ApproovError.permanentError(message: "fetchCustomJWT: SDK not initialized")
         }
         let approovResult = Approov.fetchCustomJWTAndWait(payload)
         if loggingLevel >= .info {
             os_log("ApproovService: fetchCustomJWT: %@", type: .info, Approov.string(from: approovResult.status))
         }
-        try getServiceMutator().handleFetchCustomJWTResult(approovResult)
+        try wrappingApproovError("fetchCustomJWT") {
+            try getServiceMutator().handleFetchCustomJWTResult(approovResult)
+        }
         return approovResult.token
     }
 
@@ -1026,9 +1054,7 @@ public class ApproovService {
      */
     public static func precheck() throws {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: precheck: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("precheck")
             throw ApproovError.permanentError(message: "precheck: SDK not initialized")
         }
         let approovResults = Approov.fetchSecureStringAndWait("precheck-dummy-key", nil)
@@ -1041,7 +1067,9 @@ public class ApproovService {
                 os_log("ApproovService: precheck: %@", type: .debug, Approov.string(from: approovResults.status))
             }
         }
-        try getServiceMutator().handlePrecheckResult(approovResults)
+        try wrappingApproovError("precheck") {
+            try getServiceMutator().handlePrecheckResult(approovResults)
+        }
     }
 
     /**
@@ -1049,9 +1077,7 @@ public class ApproovService {
      */
     public static func getLastARC() -> String {
         if !isApproovEnabled() {
-            if loggingLevel >= .error {
-                os_log("ApproovService: getLastARC: SDK not initialized", type: .error)
-            }
+            logApproovUnavailable("getLastARC")
             return ""
         }
         guard let approovPins = Approov.getPins("public-key-sha256") else {

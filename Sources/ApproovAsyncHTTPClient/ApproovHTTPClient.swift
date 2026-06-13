@@ -611,6 +611,8 @@ extension ApproovHTTPClient {
                 }
             }
         }
+        // Either a one-shot/streaming body (correctly skipped) or the AsyncHTTPClient body layout
+        // changed and reflection no longer matches. In both cases no body digest will be generated.
         return nil
     }
 }
@@ -824,6 +826,9 @@ extension ApproovHTTPClient {
                     }
                 }
             }
+            // The reflection above relies on AsyncHTTPClient internals; if its shape ever changes we
+            // cannot map the preference and fall back to .indifferent. This is a known limitation of
+            // bridging the wrapped client's EventLoopPreference.
             self.preference = .indifferent
         }
 

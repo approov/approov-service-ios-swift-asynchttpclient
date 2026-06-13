@@ -144,23 +144,33 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             switch params.getAlg() {
             case ApproovDefaultMessageSigning.ALG_ES256:
                 sigId = "install"
-                guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
-                      let decodedSignature = Data(base64Encoded: base64Signature) else {
+                // A nil signature means the SDK cannot provide one (e.g. key pair generation is
+                // unavailable): this is the documented silent fallback, so proceed unsigned.
+                guard let base64Signature = ApproovService.getInstallMessageSignature(message: message) else {
                     if ApproovService.loggingLevel >= .error {
                         os_log("ApproovService: install message signature unavailable, skipping signing", type: .error)
                     }
                     return provider.getRequest()
                 }
+                // A non-nil but undecodable signature is a real error and must be propagated.
+                guard let decodedSignature = Data(base64Encoded: base64Signature) else {
+                    throw ApproovError.permanentError(message: "Failed to base64-decode install message signature")
+                }
                 // decode the signature from ASN.1 DER format
                 signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
             case ApproovDefaultMessageSigning.ALG_HS256:
                 sigId = "account"
-                guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
-                      let decodedSignature = Data(base64Encoded: base64Signature) else {
+                // A nil signature means no account signature is available yet (e.g. no mksid): this is
+                // the documented silent fallback, so proceed unsigned.
+                guard let base64Signature = ApproovService.getAccountMessageSignature(message: message) else {
                     if ApproovService.loggingLevel >= .error {
                         os_log("ApproovService: account message signature unavailable, skipping signing", type: .error)
                     }
                     return provider.getRequest()
+                }
+                // A non-nil but undecodable signature is a real error and must be propagated.
+                guard let decodedSignature = Data(base64Encoded: base64Signature) else {
+                    throw ApproovError.permanentError(message: "Failed to base64-decode account message signature")
                 }
                 signature = decodedSignature
             default:
@@ -175,15 +185,16 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 throw ApproovError.permanentError(message: "Failed to serialize signature input header")
             }
 
-            // Add headers to the request
+            // Add headers to the request. Use replaceOrAdd so that re-processing an already-signed
+            // request does not emit duplicate Signature / Signature-Input header lines.
             var signedRequest = provider.getRequest()
-            signedRequest.headers.add(name: "Signature", value: sigHeader)
-            signedRequest.headers.add(name: "Signature-Input", value: sigInputHeader)
+            signedRequest.headers.replaceOrAdd(name: "Signature", value: sigHeader)
+            signedRequest.headers.replaceOrAdd(name: "Signature-Input", value: sigInputHeader)
 
             if params.isDebugMode() {
                 let digest = ApproovDefaultMessageSigning.sha256(data: Data(message.utf8))
                 if let sigBaseDigestHeader = try SFV.serializeDictionary(key: "sha-256", data: digest) {
-                    signedRequest.headers.add(name: "Signature-Base-Digest", value: sigBaseDigestHeader)
+                    signedRequest.headers.replaceOrAdd(name: "Signature-Base-Digest", value: sigBaseDigestHeader)
                 } else {
                     if ApproovService.loggingLevel >= .debug {
                         os_log("ApproovService: Failed to get digest algorithm - no debug entry", type: .debug)
@@ -486,7 +497,7 @@ public class SignatureParametersFactory {
             guard let digestHeader = try SFV.serializeDictionary(key: bodyDigestAlg, data: digest) else {
                 throw ApproovError.permanentError(message: "Failed to serialize Content-Digest header")
             }
-            request.headers.add(name: "Content-Digest", value: digestHeader)
+            request.headers.replaceOrAdd(name: "Content-Digest", value: digestHeader)
             provider.setRequest(request)
         } catch let error {
             throw ApproovError.permanentError(message: "Failed to serialize Content-Digest header: \(error)")
@@ -548,6 +559,12 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
     }
 
     public func getPath() -> String {
+        // RFC 9421 derived components use the on-wire (percent-encoded) path, whereas URL.path is
+        // percent-decoded. Prefer the encoded form so the server reconstructs the same signature base.
+        if let encodedPath = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+           !encodedPath.isEmpty {
+            return encodedPath
+        }
         return request.url.path
     }
 

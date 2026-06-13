@@ -65,6 +65,8 @@ ApproovService.bindHeader = "Authorization"
 let header = ApproovService.bindHeader
 ```
 
+> **Important:** Automatic token binding (via `bindHeader`) and manual token binding (via `setDataHashInToken`) must **not** be mixed. Use one mechanism or the other. When `bindHeader` is set, the service layer reads that header from each outgoing request and supplies its hash to Approov, which will overwrite any value set manually with `setDataHashInToken`.
+
 ### approovTokenHeaderAndPrefix
 Sets the header that the Approov token is added on, as well as an optional prefix String (such as "Bearer "). By default the token is provided on "Approov-Token" with no prefix.
 
@@ -156,6 +158,8 @@ Updates a URL and `HTTPHeaders` collection with Approov protection and secure st
 ```swift
 let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: url, headers: headers)
 ```
+
+> **Note:** This legacy convenience overload only carries a URL and headers — it assumes the `GET` method and no body. If you use a custom service mutator that performs message signing, prefer `signRequest(_:)` or the `ApproovHTTPClient` execute path so the actual method and body are available for the signature base.
 
 ### signRequest(_:)
 Convenience method that applies Approov protection to a `HTTPClient.Request` and returns the protected request directly. Note: This method is synchronous and may block briefly.
@@ -251,7 +255,7 @@ let deviceId = ApproovService.getDeviceID()
 ```
 
 ### setDataHashInToken(data:)
-Directly sets the data hash for subsequently fetched Approov tokens.
+Directly sets the data hash for subsequently fetched Approov tokens. This is the manual alternative to `bindHeader`; the two must not be mixed (see the note on `bindHeader`).
 
 ```swift
 ApproovService.setDataHashInToken(data: "<data-to-hash>")
@@ -303,7 +307,7 @@ let jwt = try ApproovService.fetchCustomJWT(payload: "{\"claims\":{}}")
 ```
 
 ### precheck()
-Performs a precheck to verify if the app will pass attestation.
+Performs a precheck to verify if the app will pass attestation. Internally this performs a secure string fetch with an `UNKNOWN_KEY`, which is treated as a success path. This is intended for **development-time** verification of an integration; it is not required in production flows. Throws `ApproovError` (e.g. `rejectionError` if the app fails attestation).
 
 ```swift
 try ApproovService.precheck()
