@@ -130,9 +130,53 @@ public class ApproovPinningVerifier {
         if !ApproovService.isApproovEnabled() {
             return true
         }
-        
+
+        // Pin against the OS-validated certificate path rather than the raw peer-supplied chain.
+        // SecTrustEvaluateWithError only validates the path it builds to a trusted anchor; the input
+        // array may contain additional certificates that are not part of that path. An attacker holding
+        // any CA-trusted certificate for the host could otherwise append the legitimate pinned
+        // certificate as an unused decoy and have the pin match succeed against it. Extracting the
+        // evaluated chain from the trust object ensures we only compare pins against certificates that
+        // actually participate in the validated path.
+        guard let validatedChain = ApproovPinningVerifier.evaluatedCertificateChain(from: serverTrust!) else {
+            throw ApproovError.pinningError(
+                message: "Error retrieving validated certificate chain for host \(hostname)")
+        }
+
         // Check the Approov dynamic pinning
-        return try self.hasApproovPinMatch(host: hostname, certChain: certChain)
+        return try self.hasApproovPinMatch(host: hostname, certChain: validatedChain)
+    }
+
+    /**
+     * Extracts the certificate chain that was actually validated by trust evaluation.
+     *
+     * This must be called only after SecTrust evaluation has succeeded. The returned chain reflects the
+     * path SecTrust built to a trusted anchor, excluding any extra certificates the peer supplied that do
+     * not participate in that path.
+     *
+     * @param trust the evaluated SecTrust object
+     * @return the validated certificate chain, or nil if it could not be retrieved
+     */
+    static func evaluatedCertificateChain(from trust: SecTrust) -> [SecCertificate]? {
+        if #available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *) {
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], !chain.isEmpty else {
+                return nil
+            }
+            return chain
+        } else {
+            let count = SecTrustGetCertificateCount(trust)
+            guard count > 0 else {
+                return nil
+            }
+            var chain: [SecCertificate] = []
+            for index in 0..<count {
+                guard let cert = SecTrustGetCertificateAtIndex(trust, index) else {
+                    return nil
+                }
+                chain.append(cert)
+            }
+            return chain
+        }
     }
 
     /**

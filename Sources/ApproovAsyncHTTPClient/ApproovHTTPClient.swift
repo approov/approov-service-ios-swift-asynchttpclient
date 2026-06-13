@@ -432,7 +432,7 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let bodyData = extractBodyData(from: request.body)
+        let bodyData = ApproovService.extractBodyData(from: request.body)
         
         let approovReq = ApproovRequest(
             url: request.url,
@@ -471,8 +471,8 @@ public class ApproovHTTPClient {
         guard let reqURL = URL(string: url) else {
             throw HTTPClientError.invalidURL
         }
-        let bodyData = extractBodyData(from: body)
-        
+        let bodyData = ApproovService.extractBodyData(from: body)
+
         let approovReq = ApproovRequest(
             url: reqURL,
             method: method.rawValue,
@@ -566,25 +566,6 @@ extension ApproovHTTPClient {
         case .ShouldFail:
             throw ApproovError.permanentError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
         }
-    }
-
-    private static func extractBodyData(from body: HTTPClient.Body?) -> Data? {
-        guard let body = body else { return nil }
-        let eventLoop = EmbeddedEventLoop()
-        var accumulated = Data()
-        let writer = HTTPClient.Body.StreamWriter { ioData in
-            switch ioData {
-            case .byteBuffer(var buffer):
-                if let bytes = buffer.readBytes(length: buffer.readableBytes) {
-                    accumulated.append(contentsOf: bytes)
-                }
-            default:
-                break
-            }
-            return eventLoop.makeSucceededFuture(())
-        }
-        _ = body.stream(writer)
-        return accumulated
     }
 
     private static func extractBodyData(from body: HTTPClientRequest.Body?) -> Data? {
@@ -719,11 +700,23 @@ extension ApproovHTTPClient {
                         eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
                         deadline: self.deadline,
                         logger: self.logger)
-                    self.lock.withLock {
+                    // Store the task and re-check cancellation under the same lock to close the race
+                    // where cancel() arrives between the check above and the task being stored: such a
+                    // cancel() would otherwise read a nil task and the request would run uncancelled.
+                    let cancelledBeforeStore = self.lock.withLock { () -> Bool in
+                        if self._isCancelled {
+                            return true
+                        }
                         self._httpClientTask = httpClientTask
+                        return false
+                    }
+                    if cancelledBeforeStore {
+                        httpClientTask.cancel()
+                        self.promise.fail(HTTPClientError.cancelled)
+                        return
                     }
                     // Set up the promise to complete when the wrapped HTTPClient.Task's promise completes
-                    self._httpClientTask!.futureResult.whenComplete { result in
+                    httpClientTask.futureResult.whenComplete { result in
                         switch result {
                         case .failure(let error):
                             self.promise.fail(error)

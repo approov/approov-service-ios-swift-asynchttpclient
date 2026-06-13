@@ -369,6 +369,8 @@ public class SignatureParametersFactory {
             self.bodyDigestAlgorithm = algorithm
             self.bodyDigestRequired = required
         } else {
+            // Passing a nil algorithm disables body digest generation entirely.
+            self.bodyDigestAlgorithm = nil
             self.bodyDigestRequired = false
         }
         return self

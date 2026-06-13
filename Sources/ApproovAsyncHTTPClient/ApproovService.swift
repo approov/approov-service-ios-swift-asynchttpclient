@@ -384,7 +384,7 @@ public class ApproovService {
     }
 
     public static func signRequest(_ request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let bodyData = try getHTTPBody(request)
+        let bodyData = extractBodyData(from: request.body)
         let approovReq = ApproovRequest(
             url: request.url,
             method: request.method.rawValue,
@@ -411,25 +411,58 @@ public class ApproovService {
         }
     }
     
-    private static func getHTTPBody(_ request: HTTPClient.Request) throws -> Data? {
-        guard let requestBody = request.body else {
+    /**
+     * Extracts the body data from an AsyncHTTPClient `HTTPClient.Body` for body-digest computation.
+     *
+     * `HTTPClient.Body` is opaque: unlike the async `HTTPClientRequest.Body` it exposes no flag
+     * indicating whether it can be consumed more than once. To avoid corrupting one-shot or
+     * asynchronous streaming uploads, the body is only buffered when it can be read non-destructively
+     * and completely: its stream closure is invoked on an isolated `EmbeddedEventLoop` and the
+     * resulting future must complete synchronously. In-memory bodies (`.byteBuffer`, `.bytes`,
+     * `.string`) satisfy this and still re-stream correctly at execution time, because reading the
+     * buffered copy does not advance the original. Chunked / one-shot / asynchronous streaming bodies
+     * are skipped (returns nil) so the request proceeds without a body digest rather than being
+     * silently truncated or consumed — matching the documented "gracefully skip one-shot uploads"
+     * behaviour for body digests.
+     *
+     * - Parameter body: the request body to inspect.
+     * - Returns: the complete body bytes if they could be buffered non-destructively; otherwise nil.
+     */
+    static func extractBodyData(from body: HTTPClient.Body?) -> Data? {
+        guard let body = body else {
             return nil
         }
-        
-        var collectedData: Data? = nil
+
+        // A nil length indicates a chunked / streaming body of unknown size; treat it as one-shot and
+        // skip it so we never start consuming an unrepeatable source.
+        if body.length == nil {
+            return nil
+        }
+
         let eventLoop = EmbeddedEventLoop()
+        var accumulated = Data()
+        var unsupportedChunk = false
         let writer = HTTPClient.Body.StreamWriter { ioData in
             switch ioData {
             case .byteBuffer(let buffer):
-                collectedData = buffer.getData(at: 0, length: buffer.readableBytes)
+                accumulated.append(contentsOf: buffer.readableBytesView)
             default:
-                break
+                // File regions and other chunk kinds cannot be digested in-memory.
+                unsupportedChunk = true
             }
             return eventLoop.makeSucceededFuture(())
         }
-        
-        _ = requestBody.stream(writer)
-        return collectedData
+
+        var completedSynchronously = false
+        let future = body.stream(writer)
+        future.whenComplete { _ in completedSynchronously = true }
+        eventLoop.run()
+
+        guard completedSynchronously, !unsupportedChunk else {
+            // Streaming / asynchronous body: do not digest a partial or consumed body.
+            return nil
+        }
+        return accumulated
     }
 
     private static func applyMutatorError(_ error: Error,

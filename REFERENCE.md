@@ -352,3 +352,11 @@ Static helper used internally by the client's TLS configuration. Returns a boole
 ```swift
 let isPinned = ApproovPinningVerifier.verifyPinning(sec_protocol_metadata: metadata)
 ```
+
+### Dynamic Pinning Behavior
+
+Approov pins are evaluated by the verifier **once per TLS handshake**. On each new connection the verifier calls `Approov.getPins("public-key-sha256")` to obtain the current pin set, so any dynamic pin update delivered by the Approov SDK takes effect immediately for **every connection established after the update**. If the presented certificate chain does not match the current pins, the handshake fails and that connection is never used.
+
+Pins are matched against the certificate chain that the operating system actually validated (the path built to a trusted anchor), not the raw chain presented by the server. Extra certificates a peer includes that are not part of the validated path cannot satisfy a pin.
+
+> **Note — pooled connections and pin updates:** `ApproovHTTPClient` reuses the connection pool managed by the underlying `HTTPClient`. Because pinning is enforced at handshake time, a connection that was already open and validated under a previous pin set continues to serve requests until it is closed and re-established (for example when it idles out of the pool or the server closes it). New pins are therefore guaranteed to be enforced on all *new* connections immediately, but an existing pooled connection may continue to be used briefly after a pin update. Applications that require all in-flight connections to re-pin immediately after a dynamic update should create a fresh `ApproovHTTPClient` (and shut down the previous one), which forces every subsequent connection to re-handshake under the current pins.

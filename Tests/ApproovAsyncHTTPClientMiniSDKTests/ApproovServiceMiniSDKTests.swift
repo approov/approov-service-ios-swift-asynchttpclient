@@ -545,6 +545,64 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    func testExtractBodyDataBuffersInMemoryBody() {
+        // An in-memory byteBuffer body completes synchronously and must be buffered in full.
+        let body = HTTPClient.Body.byteBuffer(ByteBuffer(string: "hello-body"))
+        XCTAssertEqual(ApproovService.extractBodyData(from: body), Data("hello-body".utf8))
+    }
+
+    func testExtractBodyDataAccumulatesMultipleChunks() {
+        // A repeatable, known-length body that emits several chunks must be accumulated in full,
+        // not reduced to only the final chunk (the previous getHTTPBody overwrite bug).
+        let body = HTTPClient.Body.stream(length: 6) { writer in
+            _ = writer.write(.byteBuffer(ByteBuffer(string: "abc")))
+            return writer.write(.byteBuffer(ByteBuffer(string: "def")))
+        }
+        XCTAssertEqual(ApproovService.extractBodyData(from: body), Data("abcdef".utf8))
+    }
+
+    func testExtractBodyDataSkipsOneShotStreamingBody() {
+        // A chunked streaming body (nil length) is treated as one-shot and must be skipped (nil)
+        // rather than consumed or partially digested.
+        let body = HTTPClient.Body.stream(length: nil) { writer in
+            writer.write(.byteBuffer(ByteBuffer(string: "streamed")))
+        }
+        XCTAssertNil(ApproovService.extractBodyData(from: body))
+    }
+
+    func testExtractBodyDataReturnsNilForNoBody() {
+        XCTAssertNil(ApproovService.extractBodyData(from: nil))
+    }
+
+    func testBodyDigestEnabledAddsContentDigestComponent() throws {
+        // Positive control: the default factory's SHA-256 digest adds a content-digest component.
+        let factory = try ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setBodyDigestConfig(ApproovDefaultMessageSigning.DIGEST_SHA256, required: false)
+        let request = ApproovRequest(url: URL(string: "https://example.com/path")!,
+                                     method: "POST",
+                                     headers: HTTPHeaders(),
+                                     body: Data("{\"test\": 1}".utf8))
+        let provider = ApproovAsyncHTTPClientComponentProvider(request: request)
+        let params = try factory.buildSignatureParameters(provider: provider, changes: ApproovRequestMutations())
+        XCTAssertTrue(params.containsComponentIdentifier("content-digest"),
+                      "content-digest component should be present when body digest is enabled")
+    }
+
+    func testBodyDigestDisabledViaNilAlgorithmOmitsContentDigest() throws {
+        // The default factory enables SHA-256 body digest; disabling it with a nil algorithm must
+        // prevent any content-digest component from being added to the signature parameters.
+        let factory = try ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setBodyDigestConfig(nil, required: false)
+        let request = ApproovRequest(url: URL(string: "https://example.com/path")!,
+                                     method: "POST",
+                                     headers: HTTPHeaders(),
+                                     body: Data("{\"test\": 1}".utf8))
+        let provider = ApproovAsyncHTTPClientComponentProvider(request: request)
+        let params = try factory.buildSignatureParameters(provider: provider, changes: ApproovRequestMutations())
+        XCTAssertFalse(params.containsComponentIdentifier("content-digest"),
+                       "content-digest component must be absent once body digest is disabled")
+    }
+
     // MARK: - §6 Secure Strings & Custom JWT
 
     func testFetchSecureStringReturnsConfiguredValue() throws {
