@@ -49,9 +49,11 @@ var packageTargets: [Target] = [
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOEmbedded", package: "swift-nio"),
+            .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
             .product(name: "Approov", package: approovPackageName),
             .product(name: "RawStructuredFieldValues", package: "swift-http-structured-headers")
-        ]
+        ],
+        exclude: ["util/sig/LICENSE"]
     )
 ]
 

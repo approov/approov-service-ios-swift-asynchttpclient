@@ -212,8 +212,13 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
     }
 
     // Decode ASN.1 DER encoded ES256 signature into "raw" signature format
-    private static func decodeASN_1_DER_ES256_Signature(_ signature: Data) throws -> Data {
+    static func decodeASN_1_DER_ES256_Signature(_ signature: Data) throws -> Data {
         var offset = 0
+
+        // Ensure signature has at least 2 bytes (tag and length)
+        guard signature.count >= 2 else {
+            throw ApproovError.permanentError(message: "ASN.1 DER signature too short")
+        }
 
         // Ensure the signature starts with a valid ASN.1 sequence
         guard signature[offset] == 0x30 else {
@@ -229,6 +234,11 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             throw ApproovError.permanentError(message: "Invalid ASN.1 DER sequence length")
         }
 
+        // Ensure there are at least 2 more bytes for r's tag and length
+        guard offset + 2 <= signature.count else {
+            throw ApproovError.permanentError(message: "Truncated ASN.1 DER signature reading r")
+        }
+
         // Decode the first integer (r)
         guard signature[offset] == 0x02 else {
             throw ApproovError.permanentError(message: "Invalid ASN.1 DER integer for r")
@@ -238,8 +248,18 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         let rLength = Int(signature[offset])
         offset += 1
 
+        // Ensure we can read rBytes
+        guard offset + rLength <= signature.count else {
+            throw ApproovError.permanentError(message: "Truncated ASN.1 DER signature reading r value")
+        }
+
         let rBytes = signature[offset..<(offset + rLength)]
         offset += rLength
+
+        // Ensure there are at least 2 more bytes for s's tag and length
+        guard offset + 2 <= signature.count else {
+            throw ApproovError.permanentError(message: "Truncated ASN.1 DER signature reading s")
+        }
 
         // Decode the second integer (s)
         guard signature[offset] == 0x02 else {
@@ -249,6 +269,11 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
 
         let sLength = Int(signature[offset])
         offset += 1
+
+        // Ensure we can read sBytes
+        guard offset + sLength <= signature.count else {
+            throw ApproovError.permanentError(message: "Truncated ASN.1 DER signature reading s value")
+        }
 
         let sBytes = signature[offset..<(offset + sLength)]
         offset += sLength
@@ -328,11 +353,13 @@ public class SignatureParametersFactory {
     private var addApproovTraceIDHeader: Bool = false
     private var optionalHeaders: [String] = []
 
+    @discardableResult
     public func setBaseParameters(_ baseParameters: SignatureParameters) -> SignatureParametersFactory {
         self.baseParameters = baseParameters
         return self
     }
 
+    @discardableResult
     public func setBodyDigestConfig(_ bodyDigestAlgorithm: String?, required: Bool) throws -> SignatureParametersFactory {
         if let algorithm = bodyDigestAlgorithm {
             guard algorithm == ApproovDefaultMessageSigning.DIGEST_SHA256 ||
@@ -347,36 +374,43 @@ public class SignatureParametersFactory {
         return self
     }
 
+    @discardableResult
     public func setUseInstallMessageSigning() -> SignatureParametersFactory {
         self.useAccountMessageSigning = false
         return self
     }
 
+    @discardableResult
     public func setUseAccountMessageSigning() -> SignatureParametersFactory {
         self.useAccountMessageSigning = true
         return self
     }
 
+    @discardableResult
     public func setAddCreated(_ addCreated: Bool) -> SignatureParametersFactory {
         self.addCreated = addCreated
         return self
     }
 
+    @discardableResult
     public func setExpiresLifetime(_ expiresLifetime: Int64) -> SignatureParametersFactory {
         self.expiresLifetime = expiresLifetime
         return self
     }
 
+    @discardableResult
     public func setAddApproovTokenHeader(_ addApproovTokenHeader: Bool) -> SignatureParametersFactory {
         self.addApproovTokenHeader = addApproovTokenHeader
         return self
     }
 
+    @discardableResult
     public func setAddApproovTraceIDHeader(_ addApproovTraceIDHeader: Bool) -> SignatureParametersFactory {
         self.addApproovTraceIDHeader = addApproovTraceIDHeader
         return self
     }
 
+    @discardableResult
     public func addOptionalHeaders(_ headers: [String]) -> SignatureParametersFactory {
         self.optionalHeaders.append(contentsOf: headers)
         return self

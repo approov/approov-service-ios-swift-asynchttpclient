@@ -8,6 +8,7 @@ import NIOSSL
 import Approov
 import MiniSDKTestSupport
 import CryptoKit
+import NIOEmbedded
 
 /// Integration tests for the ApproovService AsyncHTTPClient service layer.
 final class ApproovServiceMiniSDKTests: XCTestCase {
@@ -466,7 +467,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(signature.components(separatedBy: "install=").count, 2)
         XCTAssertFalse(signature.contains("account="))
 
-        var unprotectedRequest = try HTTPClient.Request(url: unprotectedURLString, method: .GET)
+        let unprotectedRequest = try HTTPClient.Request(url: unprotectedURLString, method: .GET)
         let unprotectedReply = fetchNetworkReply(for: unprotectedRequest)
 
         XCTAssertNil(getHeader(from: unprotectedReply, key: "Approov-Token"))
@@ -770,6 +771,251 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let response2 = ApproovService.updateRequestWithApproov(request: appReq)
         XCTAssertEqual(response2.decision, .ShouldProceed)
         XCTAssertEqual(response2.sdkMessage, "success")
+    }
+
+    func testInitializeWithEmptyConfigAfterValidConfigIsIgnored() throws {
+        // Initialized with valid config
+        try reinitializeServiceWithTargetHost()
+        XCTAssertTrue(ApproovService.isInitialized())
+        XCTAssertTrue(ApproovService.isApproovEnabled())
+        
+        // Attempting initialize with empty config should be ignored
+        try ApproovService.initialize(config: "")
+        XCTAssertTrue(ApproovService.isInitialized())
+        XCTAssertTrue(ApproovService.isApproovEnabled()) // Remains enabled
+    }
+
+    func testRepeatedReinitAndOptionsCommentBehavior() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        // Initial setup with options: comment
+        try ApproovService.initialize(config: validInitialConfig, comment: "options:test-option")
+        XCTAssertTrue(ApproovService.isInitialized())
+        
+        // Repeated setup with reinit... comment should be forwarded and succeed
+        try ApproovService.initialize(config: validInitialConfig, comment: "reinit-options")
+        XCTAssertTrue(ApproovService.isInitialized())
+    }
+
+    func testStatePreservationAfterFailedDifferentConfigInit() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        // Attempting initialize with a different non-empty config should throw and preserve state
+        XCTAssertThrowsError(try ApproovService.initialize(config: "different-config-string", comment: "reinit")) { error in
+            XCTAssertNotNil(error)
+        }
+        XCTAssertTrue(ApproovService.isInitialized())
+        XCTAssertTrue(ApproovService.isApproovEnabled())
+    }
+
+    func testCustomTokenAndTraceHeaderNamesAndPrefixes() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        ApproovService.approovTokenHeaderAndPrefix = (approovTokenHeader: "Custom-Token", approovTokenPrefix: "CustomPrefix ")
+        ApproovService.setApproovTraceIDHeader(header: "Custom-TraceID")
+        
+        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
+        let protectedReply = fetchNetworkReply(for: request)
+        
+        XCTAssertNotNil(protectedReply, "Expected request to succeed")
+        let customToken = getHeader(from: protectedReply, key: "Custom-Token")
+        XCTAssertNotNil(customToken)
+        XCTAssertTrue(customToken?.hasPrefix("CustomPrefix ") ?? false)
+        XCTAssertNotNil(getHeader(from: protectedReply, key: "Custom-TraceID"))
+        
+        // Test null/nil prefix treated as empty string
+        ApproovService.approovTokenHeaderAndPrefix = (approovTokenHeader: "Custom-Token", approovTokenPrefix: "")
+        let reply2 = fetchNetworkReply(for: request)
+        let customToken2 = getHeader(from: reply2, key: "Custom-Token")
+        XCTAssertFalse(customToken2?.hasPrefix("null") ?? true)
+    }
+
+    func testMissingAndEmptyTokenAndTraceArtifacts() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        class FallbackMutator: ApproovServiceMutator {
+            func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool { return true }
+            func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool { return true }
+            func handleInterceptorHeaderSubstitutionResult(_ approovResults: ApproovTokenFetchResult, header: String) throws -> Bool { return true }
+            func handleInterceptorQueryParamSubstitutionResult(_ approovResults: ApproovTokenFetchResult, queryKey: String) throws -> Bool { return true }
+            func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest { return request }
+            func handlePinningShouldProcessRequest(hostname: String) -> Bool { return true }
+        }
+        ApproovService.setServiceMutator(FallbackMutator())
+        
+        // Set next attestation directive to yield empty token/trace with status REJECTED (so they are not overwritten)
+        MiniSDKAttesterProxyController.setNextAttestationDirectiveJSON("{\"response\": {\"status\": \"REJECTED\", \"token\": \"\", \"traceID\": \"\"}}")
+        
+        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
+        let protectedReply = fetchNetworkReply(for: request)
+        
+        // Emitted headers should be empty rather than omitted
+        let token = getHeader(from: protectedReply, key: "Approov-Token")
+        let trace = getHeader(from: protectedReply, key: "Approov-TraceID")
+        XCTAssertEqual(token, "")
+        XCTAssertEqual(trace, "")
+    }
+
+    func testSubstitutionRemoval() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: "Bearer ")
+        ApproovService.removeSubstitutionHeader(header: "Api-Key")
+        
+        var request = try HTTPClient.Request(url: targetURLString, method: .GET)
+        request.headers.add(name: "Api-Key", value: "Bearer placeholder-key")
+        
+        let reply = fetchNetworkReply(for: request)
+        // Original placeholder should remain since substitution was removed
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer placeholder-key")
+    }
+
+    func testEmptySubstitutionValues() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: "")
+        
+        // Load scenario where key lookup yields empty secure string
+        MiniSDKAttesterProxyController.setNextAttestationDirectiveJSON("{\"status\": \"SUCCESS\", \"secureString\": \"\"}")
+        
+        var request = try HTTPClient.Request(url: targetURLString, method: .GET)
+        request.headers.add(name: "Api-Key", value: "placeholder-key")
+        
+        let reply = fetchNetworkReply(for: request)
+        // Original placeholder should remain intact if lookup is empty
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "placeholder-key")
+    }
+
+    func testUnprotectedExcludedPinningBehavior() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        // Add exclusion for matching endpoint
+        ApproovService.addExclusionURLRegex(urlRegex: ".*/excluded")
+        
+        // Verify pinning still active for host even if URL is excluded from token injection
+        MiniSDKAttesterProxyController.setNextPinningDirectiveJSON("{\"operation\": \"getPins\", \"shouldFail\": true}")
+        
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer {
+            try? client.syncShutdown()
+        }
+        let request = try HTTPClient.Request(url: "\(targetURLString)/excluded", method: .GET)
+        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
+            XCTAssertNotNil(error)
+        }
+    }
+
+    func testAsyncBodyDigestBehavior() async throws {
+        try reinitializeServiceWithTargetHost()
+        
+        let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setUseInstallMessageSigning()
+        let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
+        ApproovService.setServiceMutator(signer)
+        
+        var request = HTTPClientRequest(url: targetURLString)
+        request.method = .POST
+        request.body = .bytes(ByteBuffer(string: "test-async-body"))
+        
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer {
+            try? client.syncShutdown()
+        }
+        let response = try await client.execute(request, timeout: .seconds(5))
+        
+        // Consume response
+        var body = try await response.body.collect(upTo: 1024 * 1024)
+        guard let data = body.readData(length: body.readableBytes),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let headers = obj["headers"] as? [String: Any] else {
+            XCTFail("Failed to parse response body")
+            return
+        }
+        
+        XCTAssertNotNil(headers["content-digest"])
+        XCTAssertNotNil(headers["signature"])
+    }
+
+    func testUnsupportedSigningAlgorithms() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        class UnsupportedAlgFactory: SignatureParametersFactory {
+            override func buildSignatureParameters(provider: ApproovAsyncHTTPClientComponentProvider, changes: ApproovRequestMutations) throws -> SignatureParameters {
+                let params = try super.buildSignatureParameters(provider: provider, changes: changes)
+                params.setAlg("unsupported-alg")
+                return params
+            }
+        }
+        
+        let factory = UnsupportedAlgFactory()
+            .setUseInstallMessageSigning()
+        let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
+        ApproovService.setServiceMutator(signer)
+        
+        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer {
+            try? client.syncShutdown()
+        }
+        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
+            XCTAssertNotNil(error)
+        }
+    }
+
+    func testASN1DecodeFailures() throws {
+        // Test various invalid ASN.1 DER structures directly to verify bounds checking
+        let tooShort = Data([0x30])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(tooShort))
+        
+        let invalidSequenceTag = Data([0x02, 0x01, 0x00])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(invalidSequenceTag))
+        
+        let invalidSequenceLength = Data([0x30, 0x05, 0x02, 0x01, 0x00])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(invalidSequenceLength))
+        
+        let truncatedR = Data([0x30, 0x02, 0x02, 0x01])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(truncatedR))
+        
+        let invalidRTag = Data([0x30, 0x04, 0x03, 0x01, 0x00, 0x02])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(invalidRTag))
+        
+        let truncatedRValue = Data([0x30, 0x04, 0x02, 0x05, 0x01, 0x02])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(truncatedRValue))
+        
+        let truncatedS = Data([0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01])
+        XCTAssertThrowsError(try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(truncatedS))
+    }
+
+    func testMessageSerializationFailures() throws {
+        try reinitializeServiceWithTargetHost()
+        
+        let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setUseInstallMessageSigning()
+        // Force a required body digest but provide a non-repeatable stream body that cannot be digested
+        _ = try? factory.setBodyDigestConfig("sha-256", required: true)
+        
+        let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
+        ApproovService.setServiceMutator(signer)
+        
+        // Create a non-repeatable stream body
+        var called = false
+        let requestBody = HTTPClient.Body.stream(length: 10) { writer in
+            if called {
+                return EmbeddedEventLoop().makeFailedFuture(ApproovError.permanentError(message: "Stream exhausted"))
+            }
+            called = true
+            return writer.write(.byteBuffer(ByteBuffer(string: "non-repeat")))
+        }
+        
+        let request = try HTTPClient.Request(url: targetURLString, method: .POST, body: requestBody)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer {
+            try? client.syncShutdown()
+        }
+        
+        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
+            XCTAssertNotNil(error)
+        }
     }
 
     // MARK: - Test Helpers

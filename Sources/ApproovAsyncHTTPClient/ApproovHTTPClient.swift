@@ -423,7 +423,7 @@ public class ApproovHTTPClient {
             httpClientDelegate: httpClientDelegate,
             request: request,
             delegate: delegate,
-            eventLoopPreference: .indifferent,
+            eventLoopPreference: EventLoopPreference(eventLoopPreference),
             deadline: deadline,
             logger: originalLogger ?? ApproovHTTPClient.loggingDisabled)
         task.runInBackground()
@@ -432,20 +432,7 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        var bodyData: Data? = nil
-        if let requestBody = request.body {
-            let eventLoop = EmbeddedEventLoop()
-            let writer = HTTPClient.Body.StreamWriter { ioData in
-                switch ioData {
-                case .byteBuffer(let buffer):
-                    bodyData = buffer.getData(at: 0, length: buffer.readableBytes)
-                default:
-                    break
-                }
-                return eventLoop.makeSucceededFuture(())
-            }
-            _ = requestBody.stream(writer)
-        }
+        let bodyData = extractBodyData(from: request.body)
         
         let approovReq = ApproovRequest(
             url: request.url,
@@ -484,20 +471,7 @@ public class ApproovHTTPClient {
         guard let reqURL = URL(string: url) else {
             throw HTTPClientError.invalidURL
         }
-        var bodyData: Data? = nil
-        if let requestBody = body {
-            let eventLoop = EmbeddedEventLoop()
-            let writer = HTTPClient.Body.StreamWriter { ioData in
-                switch ioData {
-                case .byteBuffer(let buffer):
-                    bodyData = buffer.getData(at: 0, length: buffer.readableBytes)
-                default:
-                    break
-                }
-                return eventLoop.makeSucceededFuture(())
-            }
-            _ = requestBody.stream(writer)
-        }
+        let bodyData = extractBodyData(from: body)
         
         let approovReq = ApproovRequest(
             url: reqURL,
@@ -572,7 +546,7 @@ extension ApproovHTTPClient {
             url: url,
             method: request.method.rawValue,
             headers: request.headers,
-            body: nil // Request body is streaming/AsyncSequence, skip digestion
+            body: extractBodyData(from: request.body)
         )
         
         let response = ApproovService.updateRequestWithApproov(request: approovReq)
@@ -592,6 +566,71 @@ extension ApproovHTTPClient {
         case .ShouldFail:
             throw ApproovError.permanentError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
         }
+    }
+
+    private static func extractBodyData(from body: HTTPClient.Body?) -> Data? {
+        guard let body = body else { return nil }
+        let eventLoop = EmbeddedEventLoop()
+        var accumulated = Data()
+        let writer = HTTPClient.Body.StreamWriter { ioData in
+            switch ioData {
+            case .byteBuffer(var buffer):
+                if let bytes = buffer.readBytes(length: buffer.readableBytes) {
+                    accumulated.append(contentsOf: bytes)
+                }
+            default:
+                break
+            }
+            return eventLoop.makeSucceededFuture(())
+        }
+        _ = body.stream(writer)
+        return accumulated
+    }
+
+    private static func extractBodyData(from body: HTTPClientRequest.Body?) -> Data? {
+        guard let body = body else { return nil }
+        let mirror = Mirror(reflecting: body)
+        for child in mirror.children {
+            if child.label == "mode" {
+                let modeMirror = Mirror(reflecting: child.value)
+                guard modeMirror.displayStyle == .enum, let caseLabel = modeMirror.children.first?.label else {
+                    continue
+                }
+                if caseLabel == "byteBuffer", let byteBuffer = modeMirror.children.first?.value as? ByteBuffer {
+                    return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                } else if caseLabel == "sequence" {
+                    let associatedValue = modeMirror.children.first!.value
+                    let assocMirror = Mirror(reflecting: associatedValue)
+                    var canBeConsumedMultipleTimes = false
+                    var closure: ((ByteBufferAllocator) -> ByteBuffer)? = nil
+                    
+                    let childrenArray = Array(assocMirror.children)
+                    if childrenArray.count >= 3 {
+                        if let flag = childrenArray[1].value as? Bool {
+                            canBeConsumedMultipleTimes = flag
+                        }
+                        if let val = childrenArray[2].value as? (ByteBufferAllocator) -> ByteBuffer {
+                            closure = val
+                        }
+                    } else {
+                        for assocChild in assocMirror.children {
+                            if assocChild.label == "canBeConsumedMultipleTimes", let value = assocChild.value as? Bool {
+                                canBeConsumedMultipleTimes = value
+                            } else if let val = assocChild.value as? (ByteBufferAllocator) -> ByteBuffer {
+                                closure = val
+                            }
+                        }
+                    }
+                    
+                    if canBeConsumedMultipleTimes, let closure = closure {
+                        let allocator = ByteBufferAllocator()
+                        let byteBuffer = closure(allocator)
+                        return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                    }
+                }
+            }
+        }
+        return nil
     }
 }
 
@@ -772,8 +811,31 @@ extension ApproovHTTPClient {
             self.preference = preference
         }
 
+        /// Initializer mapping from HTTPClient.EventLoopPreference using reflection
+        public init(_ httpClientPreference: HTTPClient.EventLoopPreference) {
+            let mirror = Mirror(reflecting: httpClientPreference)
+            for child in mirror.children {
+                if child.label == "preference" {
+                    let prefMirror = Mirror(reflecting: child.value)
+                    if prefMirror.displayStyle == .enum, let caseLabel = prefMirror.children.first?.label {
+                        if caseLabel == "indifferent" {
+                            self.preference = .indifferent
+                            return
+                        } else if caseLabel == "delegate", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                            self.preference = .delegate(on: eventLoop)
+                            return
+                        } else if caseLabel == "delegateAndChannel", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                            self.preference = .delegateAndChannel(on: eventLoop)
+                            return
+                        }
+                    }
+                }
+            }
+            self.preference = .indifferent
+        }
+
         /// Event Loop will be selected by the library.
-        public static let indifferent = EventLoopPreference(.indifferent)
+        public static let indifferent = EventLoopPreference(Preference.indifferent)
 
         /// The delegate will be run on the specified EventLoop (and the Channel if possible).
         ///
@@ -781,7 +843,7 @@ extension ApproovHTTPClient {
         /// `EventLoop` but will not establish a new network connection just to satisfy the `EventLoop` preference if
         /// another existing connection on a different `EventLoop` is readily available from a connection pool.
         public static func delegate(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegate(on: eventLoop))
+            return EventLoopPreference(Preference.delegate(on: eventLoop))
         }
 
         /// The delegate and the `Channel` will be run on the specified EventLoop.
@@ -789,7 +851,7 @@ extension ApproovHTTPClient {
         /// Use this for use-cases where you prefer a new connection to be established over re-using an existing
         /// connection that might be on a different `EventLoop`.
         public static func delegateAndChannel(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegateAndChannel(on: eventLoop))
+            return EventLoopPreference(Preference.delegateAndChannel(on: eventLoop))
         }
 
         /// The value of the wrapped HTTPClient.EventLoopPreference

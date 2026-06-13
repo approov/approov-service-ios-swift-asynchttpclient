@@ -199,6 +199,7 @@ public class ApproovService {
             failureCacheLock.withLock {
                 cachedFailureResult = nil
                 cachedFailureTime = nil
+                failureCacheMissGroup = nil
             }
 
             approovSDKInitialised = true
@@ -232,6 +233,7 @@ public class ApproovService {
         failureCacheLock.withLock {
             cachedFailureResult = nil
             cachedFailureTime = nil
+            failureCacheMissGroup = nil
         }
     }
 
@@ -536,7 +538,7 @@ public class ApproovService {
      */
     public static func updateRequestWithApproov(request: ApproovRequest) -> ApproovUpdateResponse {
         let url = request.url
-        var changes = ApproovRequestMutations()
+        let changes = ApproovRequestMutations()
 
         if !isApproovEnabled() {
             if loggingLevel >= .info {
@@ -622,8 +624,7 @@ public class ApproovService {
         }
         let traceID = approovResult.traceID
         if let traceHeader = stateLock.withLock({ _approovTraceIDHeader }),
-           !traceHeader.isEmpty,
-           !traceID.isEmpty {
+           !traceHeader.isEmpty {
             hasChanges = true
             setTraceIDHeaderKey = traceHeader
             setTraceIDHeaderValue = traceID
@@ -644,8 +645,10 @@ public class ApproovService {
                     do {
                         if try mutator.handleInterceptorHeaderSubstitutionResult(approovResults, header: header) {
                             if let secureStringResult = approovResults.secureString {
-                                hasChanges = true
-                                setSubstitutionHeaders[header] = prefix + secureStringResult
+                                if !secureStringResult.isEmpty {
+                                    hasChanges = true
+                                    setSubstitutionHeaders[header] = prefix + secureStringResult
+                                }
                             } else {
                                 response.decision = .ShouldFail
                                 response.error = ApproovError.permanentError(message: "Header substitution: key lookup error")
@@ -667,10 +670,13 @@ public class ApproovService {
         var updateURLString = url.absoluteString
         for entry in subsQueryParamsCopy {
             let urlStringRange = NSRange(updateURLString.startIndex..<updateURLString.endIndex, in: updateURLString)
-            let regex = try! NSRegularExpression(pattern: #"[\\?&]"# + entry + #"=([^&;]+)"#, options: [])
+            let escapedEntry = NSRegularExpression.escapedPattern(for: entry)
+            guard let regex = try? NSRegularExpression(pattern: #"[\\?&]"# + escapedEntry + #"=([^&;]+)"#, options: []) else {
+                continue
+            }
             let matches: [NSTextCheckingResult] = regex.matches(in: updateURLString, options: [], range: urlStringRange)
-            for match: NSTextCheckingResult in matches {
-                for rangeIndex in 1..<match.numberOfRanges {
+            for match: NSTextCheckingResult in matches.reversed() {
+                for rangeIndex in (1..<match.numberOfRanges).reversed() {
                     let matchRange = match.range(at: rangeIndex)
                     if let substringRange = Range(matchRange, in: updateURLString) {
                         let queryValue = String(updateURLString[substringRange])
@@ -683,15 +689,17 @@ public class ApproovService {
                         do {
                             if try mutator.handleInterceptorQueryParamSubstitutionResult(approovResults, queryKey: entry) {
                                 if let secureStringResult = approovResults.secureString {
-                                    hasChanges = true
-                                    queryKeys.append(entry)
-                                    updateURLString.replaceSubrange(Range(matchRange, in: updateURLString)!, with: secureStringResult)
-                                    updateURL = URL(string: updateURLString)
-                                    if updateURL == nil {
-                                        response.decision = .ShouldFail
-                                        response.error = ApproovError.permanentError(
-                                            message: "Query parameter substitution for \(entry): malformed URL \(updateURLString)")
-                                        return response
+                                    if !secureStringResult.isEmpty {
+                                        hasChanges = true
+                                        queryKeys.append(entry)
+                                        updateURLString.replaceSubrange(Range(matchRange, in: updateURLString)!, with: secureStringResult)
+                                        updateURL = URL(string: updateURLString)
+                                        if updateURL == nil {
+                                            response.decision = .ShouldFail
+                                            response.error = ApproovError.permanentError(
+                                                message: "Query parameter substitution for \(entry): malformed URL \(updateURLString)")
+                                            return response
+                                        }
                                     }
                                 }
                             }

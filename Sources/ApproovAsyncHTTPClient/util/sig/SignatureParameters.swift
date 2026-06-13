@@ -57,6 +57,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param parameters the parameters to set
      */
+    @discardableResult
     func setParameters(_ parameters: OrderedMap<String, Any>) -> SignatureParameters {
         self.componentParameters = parameters
         return self
@@ -90,6 +91,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param alg the alg to set
      */
+    @discardableResult
     func setAlg(_ alg: String) -> SignatureParameters {
         componentParameters[Self.ALG] = alg
         return self
@@ -105,6 +107,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param created the created-at time to set
      */
+    @discardableResult
     func setCreated(_ created: Int64) -> SignatureParameters {
         componentParameters[Self.CREATED] = created
         return self
@@ -120,6 +123,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param expires the expires-at time to set
      */
+    @discardableResult
     func setExpires(_ expires: Int64) -> SignatureParameters {
         componentParameters[Self.EXPIRES] = expires
         return self
@@ -135,6 +139,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param keyid the keyid to set
      */
+    @discardableResult
     func setKeyid(_ keyid: String) -> SignatureParameters {
         componentParameters[Self.KEYID] = keyid
         return self
@@ -150,6 +155,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param nonce the nonce to set
      */
+    @discardableResult
     func setNonce(_ nonce: String) -> SignatureParameters {
         componentParameters[Self.NONCE] = nonce
         return self
@@ -165,6 +171,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * @param tag the tag to set
      */
+    @discardableResult
     func setTag(_ tag: String) -> SignatureParameters {
         componentParameters[Self.TAG] = tag
         return self
@@ -186,6 +193,7 @@ public class SignatureParameters: CustomStringConvertible {
      * @param key the key for which to set the custom parameter value
      * @param value the value to set for the custom parameter
      */
+    @discardableResult
     func setCustomParameter(_ key: String, value: Any) throws -> SignatureParameters {
         switch key {
         case Self.ALG:
@@ -282,6 +290,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * Add a component without parameters.
      */
+    @discardableResult
     func addComponentIdentifier(_ identifier: String) -> SignatureParameters {
         let normalizedIdentifier = identifier.starts(with: "@") ? identifier : identifier.lowercased()
         let stringItem = StringItem(value: normalizedIdentifier, parameters: [:])
@@ -304,6 +313,7 @@ public class SignatureParameters: CustomStringConvertible {
     /**
      * Add a component with optional parameters. Field components are assumed to be already set to lowercase.
      */
+    @discardableResult
     func addComponentIdentifier(_ identifier: StringItem) -> SignatureParameters {
         componentIdentifiers.append(identifier)
         return self
