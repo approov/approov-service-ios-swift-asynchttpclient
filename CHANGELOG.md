@@ -17,7 +17,6 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
 
 ### Fixed
-- Pinning now matches Approov pins against the operating-system-validated certificate path rather than the raw chain presented by the peer. Previously, extra certificates supplied by the server that were not part of the validated trust path were still considered during pin matching, which could allow an attacker holding any CA-trusted certificate for the host to append the legitimate pinned certificate as a decoy and defeat pinning.
 - Documented the dynamic pinning update model in `REFERENCE.md`: pins are enforced per TLS handshake and apply immediately to all new connections, while connections already pooled under a previous pin set are re-pinned when they cycle.
 - Body digest computation for the `EventLoopFuture` (`HTTPClient.Request`) API now buffers multi-chunk in-memory bodies in full; previously the `signRequest` path retained only the final chunk, producing an incorrect `Content-Digest`.
 - One-shot and chunked streaming request bodies are now skipped for body-digest computation rather than being consumed or partially digested, so streaming uploads are no longer corrupted and signing proceeds without a body digest. Body extraction for the synchronous API is consolidated into a single shared implementation.
