@@ -144,36 +144,42 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             switch params.getAlg() {
             case ApproovDefaultMessageSigning.ALG_ES256:
                 sigId = "install"
-                // A nil signature means the SDK cannot provide one (e.g. key pair generation is
-                // unavailable): this is the documented silent fallback, so proceed unsigned.
-                guard let base64Signature = ApproovService.getInstallMessageSignature(message: message) else {
+                // Message signing is fail-open: if the SDK cannot provide a usable install signature
+                // (no signature available, or a value that cannot be base64-decoded) we proceed
+                // unsigned and log at error level, rather than aborting the request.
+                guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
+                      let decodedSignature = Data(base64Encoded: base64Signature) else {
                     if ApproovService.loggingLevel >= .error {
                         os_log("ApproovService: install message signature unavailable, skipping signing", type: .error)
                     }
                     return provider.getRequest()
                 }
-                // A non-nil but undecodable signature is a real error and must be propagated.
-                guard let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    throw ApproovError.permanentError(message: "Failed to base64-decode install message signature")
+                // Decode the signature from ASN.1 DER format. A malformed signature is also treated as
+                // fail-open (proceed unsigned + log) rather than aborting the request.
+                do {
+                    signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
+                } catch {
+                    if ApproovService.loggingLevel >= .error {
+                        os_log("ApproovService: failed to decode ASN.1 DER install signature, skipping signing: %@",
+                               type: .error, error.localizedDescription)
+                    }
+                    return provider.getRequest()
                 }
-                // decode the signature from ASN.1 DER format
-                signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
             case ApproovDefaultMessageSigning.ALG_HS256:
                 sigId = "account"
-                // A nil signature means no account signature is available yet (e.g. no mksid): this is
-                // the documented silent fallback, so proceed unsigned.
-                guard let base64Signature = ApproovService.getAccountMessageSignature(message: message) else {
+                // Fail-open: if the SDK cannot provide a usable account signature (none available, e.g.
+                // no mksid yet, or a value that cannot be base64-decoded) we proceed unsigned and log.
+                guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
+                      let decodedSignature = Data(base64Encoded: base64Signature) else {
                     if ApproovService.loggingLevel >= .error {
                         os_log("ApproovService: account message signature unavailable, skipping signing", type: .error)
                     }
                     return provider.getRequest()
                 }
-                // A non-nil but undecodable signature is a real error and must be propagated.
-                guard let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    throw ApproovError.permanentError(message: "Failed to base64-decode account message signature")
-                }
                 signature = decodedSignature
             default:
+                // Unsupported algorithm is a configuration error and is the one signing failure (with a
+                // required body digest) that fails closed.
                 throw ApproovError.permanentError(message: "Unsupported algorithm identifier: \(params.getAlg() ?? "unknown")")
             }
 
