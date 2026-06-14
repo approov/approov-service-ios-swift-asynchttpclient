@@ -195,3 +195,52 @@ jobs:
 
           sys.exit(0 if overall_ok else 1)
           EOF
+
+  tag-release:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Extract and Verify Version
+        id: get-version
+        run: |
+          CHANGELOG_VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') || true
+          if [ -z "$CHANGELOG_VERSION" ]; then
+            echo "::error::Could not find a version header (## [x.y.z]) in CHANGELOG.md"
+            exit 1
+          fi
+          
+          SWIFT_VERSION=$(grep -oE 'approov-service-asynchttpclient/[0-9]+\.[0-9]+\.[0-9]+' Sources/ApproovAsyncHTTPClient/ApproovService.swift | cut -d/ -f2) || true
+          if [ -z "$SWIFT_VERSION" ]; then
+            echo "::error::Could not find a version pattern (approov-service-asynchttpclient/x.y.z) in ApproovService.swift"
+            exit 1
+          fi
+
+          if [ "$CHANGELOG_VERSION" != "$SWIFT_VERSION" ]; then
+            echo "::error::Version mismatch: CHANGELOG.md ($CHANGELOG_VERSION) does not match ApproovService.swift ($SWIFT_VERSION)"
+            exit 1
+          fi
+
+          echo "VERSION=$CHANGELOG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Validated version is: $CHANGELOG_VERSION"
+
+      - name: Create and Push Tag
+        run: |
+          VERSION="${{ steps.get-version.outputs.VERSION }}"
+          
+          # Check if tag already exists
+          if git fetch origin "refs/tags/$VERSION" --quiet 2>/dev/null; then
+            echo "Tag $VERSION already exists. Skipping tagging."
+            exit 0
+          fi
+          
+          echo "Tag $VERSION does not exist. Creating and pushing..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION"
+          git push origin "$VERSION"

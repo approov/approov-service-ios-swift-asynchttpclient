@@ -447,9 +447,15 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     }
 
     func testPinningFailureTriggersPinningError() throws {
-        try reinitializeServiceWithTargetHost()
-
-        MiniSDKAttesterProxyController.setNextPinningDirectiveJSON("{\"operation\": \"getPins\", \"shouldFail\": true}")
+        let targetHost = try XCTUnwrap(URL(string: targetURLString)?.host)
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": {
+              "public-key-sha256": {
+                "*": ["invalid-pin-base64="],
+                "\(targetHost)": ["invalid-pin-base64="]
+              }
+            }
+            """)
 
         let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
         defer {
