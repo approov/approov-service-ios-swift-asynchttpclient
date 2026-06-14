@@ -205,42 +205,45 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Extract and Verify Version
+      - name: Extract Version from CHANGELOG
         id: get-version
         run: |
-          CHANGELOG_VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') || true
-          if [ -z "$CHANGELOG_VERSION" ]; then
+          VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') || true
+          if [ -z "$VERSION" ]; then
             echo "::error::Could not find a version header (## [x.y.z]) in CHANGELOG.md"
             exit 1
           fi
-          
-          SWIFT_VERSION=$(grep -oE 'approov-service-asynchttpclient/[0-9]+\.[0-9]+\.[0-9]+' Sources/ApproovAsyncHTTPClient/ApproovService.swift | cut -d/ -f2) || true
-          if [ -z "$SWIFT_VERSION" ]; then
-            echo "::error::Could not find a version pattern (approov-service-asynchttpclient/x.y.z) in ApproovService.swift"
-            exit 1
-          fi
-
-          if [ "$CHANGELOG_VERSION" != "$SWIFT_VERSION" ]; then
-            echo "::error::Version mismatch: CHANGELOG.md ($CHANGELOG_VERSION) does not match ApproovService.swift ($SWIFT_VERSION)"
-            exit 1
-          fi
-
-          echo "VERSION=$CHANGELOG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Validated version is: $CHANGELOG_VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version extracted from CHANGELOG.md is: $VERSION"
 
       - name: Create and Push Tag
         run: |
           VERSION="${{ steps.get-version.outputs.VERSION }}"
           
-          # Check if tag already exists
+          # Check if tag already exists on remote
           if git fetch origin "refs/tags/$VERSION" --quiet 2>/dev/null; then
             echo "Tag $VERSION already exists. Skipping tagging."
             exit 0
           fi
           
-          echo "Tag $VERSION does not exist. Creating and pushing..."
+          echo "Tag $VERSION does not exist. Verifying dev placeholder..."
+          FILE="Sources/ApproovAsyncHTTPClient/ApproovService.swift"
+          if ! grep -q 'approov-service-asynchttpclient/dev' "$FILE"; then
+            echo "::error::Could not find 'approov-service-asynchttpclient/dev' in $FILE"
+            exit 1
+          fi
+
+          echo "Replacing 'dev' with '$VERSION' in $FILE..."
+          perl -pi -e "s|approov-service-asynchttpclient/dev|approov-service-asynchttpclient/$VERSION|g" "$FILE"
+          
+          echo "Configuring git and committing release modifications..."
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release version $VERSION"
+          
+          echo "Creating and pushing tag $VERSION..."
           git tag "$VERSION"
           git push origin "$VERSION"
