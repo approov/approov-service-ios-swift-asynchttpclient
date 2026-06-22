@@ -80,23 +80,14 @@ public class ApproovPinningVerifier {
         let serverNameOption = sec_protocol_metadata_get_server_name(sec_protocol_metadata)
         if let serverNamePointer = serverNameOption {
             let serverName = String(cString: UnsafePointer<CChar>(serverNamePointer))
-            // TEMPORARY DIAGNOSTIC (remove after pinning investigation): NSLog is used (not os_log) so it
-            // is written to stderr and visible in the test console even when ApproovService.loggingLevel
-            // is .off. If this line never appears for a connection that should have been pinned, the
-            // verify block was skipped (e.g. TLS session resumption) and the cause is outside
-            // ApproovPinningVerifier.
-            NSLog("ApproovService[PIN-DIAG]: verifyPinning invoked host=%@ peerCertCount=%d", serverName, certChain.count)
             do {
                 let isPinned = try ApproovPinningVerifier.verifyPinning(hostname: serverName, certChain: certChain)
-                NSLog("ApproovService[PIN-DIAG]: verifyPinning result host=%@ isPinned=%d", serverName, isPinned ? 1 : 0)
                 return isPinned
             } catch {
                 os_log("ApproovService: Pinning rejection for %@. %@", type: .error, serverName, error.localizedDescription)
                 return false
             }
         } else {
-            // TEMPORARY DIAGNOSTIC (remove after pinning investigation).
-            NSLog("ApproovService[PIN-DIAG]: verifyPinning invoked with no server name; rejecting")
             return false
         }
     }
@@ -135,10 +126,6 @@ public class ApproovPinningVerifier {
             }
         }
 
-        // TEMPORARY DIAGNOSTIC (remove after pinning investigation).
-        NSLog("ApproovService[PIN-DIAG]: trust evaluation passed host=%@ approovEnabled=%d",
-              hostname, ApproovService.isApproovEnabled() ? 1 : 0)
-
         // If Approov is not enabled, dynamic pinning is bypassed but basic TLS evaluation must succeed
         if !ApproovService.isApproovEnabled() {
             return true
@@ -168,10 +155,6 @@ public class ApproovPinningVerifier {
         guard let approovCertHashes = Approov.getPins("public-key-sha256") else {
             throw ApproovError.pinningError(message: "Approov SDK getPins() call failed")
         }
-        
-        // TEMPORARY DIAGNOSTIC (remove after pinning investigation).
-        NSLog("ApproovService[PIN-DIAG]: hasApproovPinMatch host=%@ hostPinCount=%d wildcardPresent=%d",
-              host, approovCertHashes[host]?.count ?? -1, approovCertHashes["*"] != nil ? 1 : 0)
 
         // Get the receivers host
         guard var certHashesBase64 = approovCertHashes[host] else {
