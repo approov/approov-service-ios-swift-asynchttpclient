@@ -17,8 +17,15 @@ import ApproovAsyncHTTPClient
 import AsyncHTTPClient
 import NIOPosix
 
-// Initialize the Approov service
-try ApproovService.initialize(config: "<config-string>")
+// Initialize the Approov service. Initialization can fail (bad config / SDK error), so guard it
+// and fall back to bypass mode (empty config) rather than letting the app crash. See the README
+// "INITIALIZING APPROOV SERVICE" section for the full pattern (device-ID + session correlation logging).
+do {
+    try ApproovService.initialize(config: "<config-string>")
+} catch {
+    // Continue UNPROTECTED — requests go out without Approov protection; the backend stays the enforcement point.
+    try? ApproovService.initialize(config: "")
+}
 
 let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 let client = ApproovHTTPClient(eventLoopGroupProvider: .shared(group))
