@@ -17,6 +17,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
 
 ### Fixed
+- Message signing now fully conforms to the cross-layer fail-open policy (core-project-approov#564): a signature-base build failure and a `Signature`/`Signature-Input` serialization failure now log at error level and proceed **unsigned** instead of aborting the request, matching the existing install/account/base64/ASN.1 fail-open paths. Only a required body digest that cannot be generated and an unsupported algorithm still fail closed.
 - Documented the dynamic pinning update model in `REFERENCE.md`: pins are enforced per TLS handshake and apply immediately to all new connections, while connections already pooled under a previous pin set are re-pinned when they cycle.
 - Body digest computation for the `EventLoopFuture` (`HTTPClient.Request`) API now buffers multi-chunk in-memory bodies in full; previously the `signRequest` path retained only the final chunk, producing an incorrect `Content-Digest`.
 - One-shot and chunked streaming request bodies are now skipped for body-digest computation rather than being consumed or partially digested, so streaming uploads are no longer corrupted and signing proceeds without a body digest. Body extraction for the synchronous API is consolidated into a single shared implementation.
