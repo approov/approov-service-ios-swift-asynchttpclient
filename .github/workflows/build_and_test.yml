@@ -236,9 +236,10 @@ jobs:
             exit 1
           fi
 
-          echo "Replacing 'dev' with '$VERSION' in $FILE..."
+          echo "Replacing 'dev' with '$VERSION' in $FILE and Package.swift..."
           perl -pi -e "s|approov-service-asynchttpclient/dev|approov-service-asynchttpclient/$VERSION|g" "$FILE"
-          
+          perl -pi -e "s|releaseTAG = \"dev\"|releaseTAG = \"$VERSION\"|g" Package.swift
+
           echo "Configuring git and committing release modifications..."
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"

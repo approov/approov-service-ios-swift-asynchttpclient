@@ -14,6 +14,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Changed
 - Refactored `ApproovService` to handle multi-threaded state access safely with locks.
 - Changed Package.swift to swift-tools-version 5.8 with support for structured headers, exact SDK dependencies, and conditional local Mini-SDK path setup.
+- `Package.swift` `releaseTAG` is now a `dev` placeholder, stamped with the release version by the `tag-release` CI job at tag time (was a hardcoded literal), keeping it in lock-step with the runtime user-property string.
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
 
 ### Fixed

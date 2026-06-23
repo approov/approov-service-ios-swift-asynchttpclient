@@ -4,8 +4,10 @@
 import Foundation
 import PackageDescription
 
-// The release tag for this version of ApproovAsyncHTTPClient
-let releaseTAG = "3.5.4"
+// The release tag for this version of ApproovAsyncHTTPClient — "dev" for local/CI builds;
+// replaced with the CHANGELOG version by the tag-release CI job at release time (in lock-step
+// with the runtime user-property string).
+let releaseTAG = "dev"
 // SDK package version
 let sdkVersion: Version = "3.5.3"
 // NOTE: The useMiniSDK flag and miniSDKPath are used for local and CI automated testing only.
