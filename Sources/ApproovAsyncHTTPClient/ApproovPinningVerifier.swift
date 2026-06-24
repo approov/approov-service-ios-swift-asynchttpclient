@@ -125,8 +125,15 @@ public class ApproovPinningVerifier {
                     message: "Error: Certificate Trust Evaluation failure for host \(hostname)")
             }
         }
-        
-        // Check the Approov dynamic pinning
+
+        // If Approov is not enabled, dynamic pinning is bypassed but basic TLS evaluation must succeed
+        if !ApproovService.isApproovEnabled() {
+            return true
+        }
+
+        // Check the Approov dynamic pinning against the peer-presented certificate chain. This matches
+        // the behaviour of the other Approov service layers (which pin against the peer chain), keeping
+        // pin-matching consistent across platforms for the same Approov configuration.
         return try self.hasApproovPinMatch(host: hostname, certChain: certChain)
     }
 
@@ -138,54 +145,54 @@ public class ApproovPinningVerifier {
      * @return Bool true if there was a pin match
      */
     static func hasApproovPinMatch(host: String, certChain: [SecCertificate]) throws -> Bool {
-        // Ensure pins are refreshed eventually
-        ApproovService.prefetch()
+        // Check if pinning should process for this host
+        if !ApproovService.getServiceMutator().handlePinningShouldProcessRequest(hostname: host) {
+            os_log("ApproovService: Pin verification for %@ bypassed by service mutator", type: .info, host)
+            return true
+        }
         
-        // Get the certificate chain count
+        // Retrieve the pins from Approov SDK exactly once
+        guard let approovCertHashes = Approov.getPins("public-key-sha256") else {
+            throw ApproovError.pinningError(message: "Approov SDK getPins() call failed")
+        }
+
+        // Get the receivers host
+        guard var certHashesBase64 = approovCertHashes[host] else {
+            // Host is not pinned
+            os_log("ApproovService: Pin verification %@ unpinned", host)
+            return true
+        }
+        
+        // Check whether we have pins defined for this host
+        if certHashesBase64.count == 0 {
+            // There are no pins defined for this host, check for managed trust roots
+            if let managedTrustRootHashesBase64 = approovCertHashes["*"] {
+                certHashesBase64 = managedTrustRootHashesBase64
+            } else {
+                // There are no managed trust roots either, accept connection. We do not pin connections
+                // where no pins are explicitly set for the host.
+                os_log("ApproovService: Pin verification %@ empty pins", host)
+                return true
+            }
+        }
+        
+        // We have one or more cert hashes matching the receiver's host, compare them against the cert chain
         for cert in certChain {
             if let publicKeyInfo = publicKeyInfoOfCertificate(certificate: cert) {
                 // Compute the SHA-256 hash of the public key info
                 let publicKeyHash = sha256(data: publicKeyInfo)
-
-                // Check that the hash is the same as at least one of the pins
-                guard let approovCertHashes = Approov.getPins("public-key-sha256") else {
-                    throw ApproovError.pinningError(message: "Approov SDK getPins() call failed")
-                }
-                
-                // Get the receivers host
-                if var certHashesBase64 = approovCertHashes[host] {
-                    // Check whether we have pins defined for this host
-                    if certHashesBase64.count == 0 {
-                        // There are no pins defined for this host, check for managed trust roots
-                        if let managedTrustRootHashesBase64 = approovCertHashes["*"] {
-                            // Managed trust roots are available, so use these
-                            certHashesBase64 = managedTrustRootHashesBase64
-                        } else {
-                            // There are no managed trust roots either, accept connection. We do not pin connections
-                            // where no pins are explicitly set for the host.
-                            os_log("ApproovService: Pin verification %@ empty pins", host)
-                            return true
-                        }
+                for certHashBase64 in certHashesBase64 {
+                    let certHash = Data(base64Encoded: certHashBase64)
+                    if publicKeyHash == certHash {
+                        os_log("ApproovService: Matched pin %@ for %@ from %d pins", certHashBase64, host, certHashesBase64.count)
+                        return true
                     }
-
-                    // We have one or more cert hashes matching the receiver's host, compare them
-                    for certHashBase64 in certHashesBase64 {
-                        let certHash = Data(base64Encoded: certHashBase64)
-                        if publicKeyHash == certHash {
-                            os_log("ApproovService: Matched pin %@ for %@ from %d pins", certHashBase64, host, certHashesBase64.count)
-                            return true
-                        }
-                    }
-                } else {
-                    // Host is not pinned
-                    os_log("ApproovService: Pin verification %@ unpinned", host)
-                    return true
                 }
             } else {
                 os_log("ApproovService: Skipping pin checking for unknown certificate type")
             }
         }
-
+        
         // No match in current set of pins from Approov SDK and certificate chain seen during TLS handshake
         os_log("ApproovService: Pinning rejection for %@", type: .error, host)
         return false

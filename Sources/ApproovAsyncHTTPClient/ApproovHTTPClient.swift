@@ -21,6 +21,7 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
 import NIOHTTPCompression
 import NIOPosix
@@ -422,7 +423,7 @@ public class ApproovHTTPClient {
             httpClientDelegate: httpClientDelegate,
             request: request,
             delegate: delegate,
-            eventLoopPreference: .indifferent,
+            eventLoopPreference: EventLoopPreference(eventLoopPreference),
             deadline: deadline,
             logger: originalLogger ?? ApproovHTTPClient.loggingDisabled)
         task.runInBackground()
@@ -431,15 +432,34 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: request.url, headers: request.headers)
-        // Return the modified request
-        return try HTTPClient.Request(
-            url: updatedURL,
-            method: request.method,
-            headers: updatedHeaders,
-            body: request.body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
+        let bodyData = ApproovService.extractBodyData(from: request.body)
+        
+        let approovReq = ApproovRequest(
+            url: request.url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            body: bodyData
         )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            return try HTTPClient.Request(
+                url: response.request.url,
+                method: request.method,
+                headers: response.request.headers,
+                body: request.body,
+                tlsConfiguration: request.tlsConfiguration
+            )
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        }
     }
 
     /// Update a request for Approov
@@ -448,19 +468,37 @@ public class ApproovHTTPClient {
         method: HTTPMethod,
         body: HTTPClient.Body?
     ) throws -> HTTPClient.Request {
-        var updatedURLString = url
-        var updatedHeaders: HTTPHeaders = HTTPHeaders()
-        if var updatedURL: URL = URL(string: url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+        guard let reqURL = URL(string: url) else {
+            throw HTTPClientError.invalidURL
         }
-        return try HTTPClient.Request(
-            url: updatedURLString,
-            method: method,
-            headers: updatedHeaders,
-            body: body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
+        let bodyData = ApproovService.extractBodyData(from: body)
+
+        let approovReq = ApproovRequest(
+            url: reqURL,
+            method: method.rawValue,
+            headers: HTTPHeaders(),
+            body: bodyData
         )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            return try HTTPClient.Request(
+                url: response.request.url,
+                method: method,
+                headers: response.request.headers,
+                body: body,
+                tlsConfiguration: nil
+            )
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
+        }
     }
 }
 
@@ -500,18 +538,82 @@ extension ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClientRequest) async throws -> HTTPClientRequest {
-        var updatedURLString = request.url
-        var updatedHeaders: HTTPHeaders = request.headers
-        if var updatedURL: URL = URL(string: request.url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+        guard let url = URL(string: request.url) else {
+            throw HTTPClientError.invalidURL
         }
-        // Return the modified request
-        var newRequest = HTTPClientRequest(url: updatedURLString)
-        newRequest.method = request.method
-        newRequest.headers = updatedHeaders
-        newRequest.body = request.body
-        return newRequest
+        
+        let approovReq = ApproovRequest(
+            url: url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            body: extractBodyData(from: request.body)
+        )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            var newRequest = HTTPClientRequest(url: response.request.url.absoluteString)
+            newRequest.method = request.method
+            newRequest.headers = response.request.headers
+            newRequest.body = request.body
+            return newRequest
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        }
+    }
+
+    private static func extractBodyData(from body: HTTPClientRequest.Body?) -> Data? {
+        guard let body = body else { return nil }
+        let mirror = Mirror(reflecting: body)
+        for child in mirror.children {
+            if child.label == "mode" {
+                let modeMirror = Mirror(reflecting: child.value)
+                guard modeMirror.displayStyle == .enum, let caseLabel = modeMirror.children.first?.label else {
+                    continue
+                }
+                if caseLabel == "byteBuffer", let byteBuffer = modeMirror.children.first?.value as? ByteBuffer {
+                    return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                } else if caseLabel == "sequence" {
+                    let associatedValue = modeMirror.children.first!.value
+                    let assocMirror = Mirror(reflecting: associatedValue)
+                    var canBeConsumedMultipleTimes = false
+                    var closure: ((ByteBufferAllocator) -> ByteBuffer)? = nil
+                    
+                    let childrenArray = Array(assocMirror.children)
+                    if childrenArray.count >= 3 {
+                        if let flag = childrenArray[1].value as? Bool {
+                            canBeConsumedMultipleTimes = flag
+                        }
+                        if let val = childrenArray[2].value as? (ByteBufferAllocator) -> ByteBuffer {
+                            closure = val
+                        }
+                    } else {
+                        for assocChild in assocMirror.children {
+                            if assocChild.label == "canBeConsumedMultipleTimes", let value = assocChild.value as? Bool {
+                                canBeConsumedMultipleTimes = value
+                            } else if let val = assocChild.value as? (ByteBufferAllocator) -> ByteBuffer {
+                                closure = val
+                            }
+                        }
+                    }
+                    
+                    if canBeConsumedMultipleTimes, let closure = closure {
+                        let allocator = ByteBufferAllocator()
+                        let byteBuffer = closure(allocator)
+                        return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                    }
+                }
+            }
+        }
+        // Either a one-shot/streaming body (correctly skipped) or the AsyncHTTPClient body layout
+        // changed and reflection no longer matches. In both cases no body digest will be generated.
+        return nil
     }
 }
 
@@ -600,11 +702,23 @@ extension ApproovHTTPClient {
                         eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
                         deadline: self.deadline,
                         logger: self.logger)
-                    self.lock.withLock {
+                    // Store the task and re-check cancellation under the same lock to close the race
+                    // where cancel() arrives between the check above and the task being stored: such a
+                    // cancel() would otherwise read a nil task and the request would run uncancelled.
+                    let cancelledBeforeStore = self.lock.withLock { () -> Bool in
+                        if self._isCancelled {
+                            return true
+                        }
                         self._httpClientTask = httpClientTask
+                        return false
+                    }
+                    if cancelledBeforeStore {
+                        httpClientTask.cancel()
+                        self.promise.fail(HTTPClientError.cancelled)
+                        return
                     }
                     // Set up the promise to complete when the wrapped HTTPClient.Task's promise completes
-                    self._httpClientTask!.futureResult.whenComplete { result in
+                    httpClientTask.futureResult.whenComplete { result in
                         switch result {
                         case .failure(let error):
                             self.promise.fail(error)
@@ -692,8 +806,34 @@ extension ApproovHTTPClient {
             self.preference = preference
         }
 
+        /// Initializer mapping from HTTPClient.EventLoopPreference using reflection
+        public init(_ httpClientPreference: HTTPClient.EventLoopPreference) {
+            let mirror = Mirror(reflecting: httpClientPreference)
+            for child in mirror.children {
+                if child.label == "preference" {
+                    let prefMirror = Mirror(reflecting: child.value)
+                    if prefMirror.displayStyle == .enum, let caseLabel = prefMirror.children.first?.label {
+                        if caseLabel == "indifferent" {
+                            self.preference = .indifferent
+                            return
+                        } else if caseLabel == "delegate", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                            self.preference = .delegate(on: eventLoop)
+                            return
+                        } else if caseLabel == "delegateAndChannel", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                            self.preference = .delegateAndChannel(on: eventLoop)
+                            return
+                        }
+                    }
+                }
+            }
+            // The reflection above relies on AsyncHTTPClient internals; if its shape ever changes we
+            // cannot map the preference and fall back to .indifferent. This is a known limitation of
+            // bridging the wrapped client's EventLoopPreference.
+            self.preference = .indifferent
+        }
+
         /// Event Loop will be selected by the library.
-        public static let indifferent = EventLoopPreference(.indifferent)
+        public static let indifferent = EventLoopPreference(Preference.indifferent)
 
         /// The delegate will be run on the specified EventLoop (and the Channel if possible).
         ///
@@ -701,7 +841,7 @@ extension ApproovHTTPClient {
         /// `EventLoop` but will not establish a new network connection just to satisfy the `EventLoop` preference if
         /// another existing connection on a different `EventLoop` is readily available from a connection pool.
         public static func delegate(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegate(on: eventLoop))
+            return EventLoopPreference(Preference.delegate(on: eventLoop))
         }
 
         /// The delegate and the `Channel` will be run on the specified EventLoop.
@@ -709,7 +849,7 @@ extension ApproovHTTPClient {
         /// Use this for use-cases where you prefer a new connection to be established over re-using an existing
         /// connection that might be on a different `EventLoop`.
         public static func delegateAndChannel(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegateAndChannel(on: eventLoop))
+            return EventLoopPreference(Preference.delegateAndChannel(on: eventLoop))
         }
 
         /// The value of the wrapped HTTPClient.EventLoopPreference
