@@ -469,6 +469,69 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    // Trust evaluation date for the recorded certificates (2026-11-19T00:00:00Z).
+    private let pinningFixtureDate = Date(timeIntervalSince1970: 1_795_046_400)
+
+    private func fixtureCertificate(_ base64: String) throws -> SecCertificate {
+        let data = try XCTUnwrap(Data(base64Encoded: base64))
+        return try XCTUnwrap(SecCertificateCreateWithData(nil, data as CFData))
+    }
+
+    private func spkiPin(_ certificate: SecCertificate) throws -> String {
+        let spki = try XCTUnwrap(ApproovPinningVerifier.publicKeyInfoOfCertificate(certificate: certificate))
+        return ApproovPinningVerifier.sha256(data: spki).base64EncodedString()
+    }
+
+    /// The certificate path that the OS builds and validates for a chain.
+    private func validatedPath(_ chain: [SecCertificate], host: String) throws -> [SecCertificate] {
+        var trust: SecTrust?
+        XCTAssertEqual(SecTrustCreateWithCertificates(chain as CFArray, SecPolicyCreateSSL(true, host as CFString), &trust),
+                       errSecSuccess)
+        let evaluated = try XCTUnwrap(trust)
+        SecTrustSetVerifyDate(evaluated, pinningFixtureDate as CFDate)
+        XCTAssertTrue(SecTrustEvaluateWithError(evaluated, nil), "control: the recorded chain must validate")
+        return try XCTUnwrap(SecTrustCopyCertificateChain(evaluated) as? [SecCertificate])
+    }
+
+    func testPinningRejectsDecoyCertificateOutsideValidatedPath() throws {
+        let host = "replay.ivol.workers.dev"
+        let leaf = try fixtureCertificate(PinningTestCertificates.replayLeaf)
+        let intermediate = try fixtureCertificate(PinningTestCertificates.replayWE1)
+        let crossSignedRoot = try fixtureCertificate(PinningTestCertificates.replayGTSR4)
+        let decoy = try fixtureCertificate(PinningTestCertificates.appleEVCA)
+        let decoyPin = try spkiPin(decoy)
+        // The mini SDK empties the pins of the TESTING_REPLY_URL host, so the decoy key is a managed trust root.
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "\(host)": [], "*": ["\(decoyPin)"] } }
+            """)
+        let genuine = [leaf, intermediate, crossSignedRoot]
+
+        XCTAssertFalse(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: genuine,
+                                                                verifyDate: pinningFixtureDate),
+                       "control: the genuine chain does not contain the pinned key")
+        XCTAssertFalse(try validatedPath(genuine + [decoy], host: host).contains { try spkiPin($0) == decoyPin },
+                       "control: the decoy is not part of the validated path")
+        XCTAssertFalse(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: genuine + [decoy],
+                                                                verifyDate: pinningFixtureDate),
+                       "A decoy certificate outside the validated path must not satisfy the pin")
+    }
+
+    func testManagedTrustRootPinMatchesWhenServerOmitsRoot() throws {
+        let host = "www.apple.com"
+        let leaf = try fixtureCertificate(PinningTestCertificates.appleLeaf)
+        let intermediate = try fixtureCertificate(PinningTestCertificates.appleEVCA)
+        let path = try validatedPath([leaf, intermediate], host: host)
+        XCTAssertEqual(path.count, 3, "control: the OS adds the root that the server did not send")
+        let rootPin = try spkiPin(try XCTUnwrap(path.last))
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "\(host)": [], "*": ["\(rootPin)"] } }
+            """)
+
+        XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: [leaf, intermediate],
+                                                               verifyDate: pinningFixtureDate),
+                      "A managed trust root pin must match the root that trust evaluation added")
+    }
+
     // MARK: - §5 Message Signing
 
     func testUpdateRequestInstallMessageSigningAddsSignatureHeaders() throws {

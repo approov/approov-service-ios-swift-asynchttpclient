@@ -99,13 +99,17 @@ public class ApproovPinningVerifier {
      * @param certChain for which to check whether it contains a pinned certificate
      * @return Bool showing if the pinning is valid
      */
-    static func verifyPinning(hostname: String, certChain: [SecCertificate]) throws -> Bool {
+    static func verifyPinning(hostname: String, certChain: [SecCertificate], verifyDate: Date? = nil) throws -> Bool {
         // Create a server trust from the peer certificates
         let policy = SecPolicyCreateSSL(true, hostname as CFString?)
         var serverTrust: SecTrust? = nil
         let result = SecTrustCreateWithCertificates(certChain as CFArray, policy, &serverTrust)
         if (result != errSecSuccess) {
             throw ApproovError.pinningError(message: "Error during certificate trust creation for host \(hostname)")
+        }
+        // Tests set a fixed evaluation date, so that recorded certificates do not expire.
+        if let verifyDate = verifyDate {
+            SecTrustSetVerifyDate(serverTrust!, verifyDate as CFDate)
         }
         
         // Check the server trust
@@ -131,10 +135,44 @@ public class ApproovPinningVerifier {
             return true
         }
 
-        // Check the Approov dynamic pinning against the peer-presented certificate chain. This matches
-        // the behaviour of the other Approov service layers (which pin against the peer chain), keeping
-        // pin-matching consistent across platforms for the same Approov configuration.
-        return try self.hasApproovPinMatch(host: hostname, certChain: certChain)
+        // Match pins only against the certificate path that trust evaluation built and validated.
+        // A peer can send extra certificates that are not part of that path. If pins match the raw peer
+        // chain, an attacker with any trusted certificate can add the pinned certificate as an unused
+        // decoy. The validated path also contains the trust anchor, which servers usually do not send,
+        // so managed trust root pins ("*") match. The URLSession layer pins the same validated path.
+        guard let validatedChain = ApproovPinningVerifier.evaluatedCertificateChain(from: serverTrust!) else {
+            throw ApproovError.pinningError(
+                message: "Error retrieving validated certificate chain for host \(hostname)")
+        }
+        return try self.hasApproovPinMatch(host: hostname, certChain: validatedChain)
+    }
+
+    /**
+     * Gets the certificate path that trust evaluation built. Call it only after a successful evaluation.
+     * The path excludes peer certificates that are not part of it, and includes the trust anchor.
+     *
+     * @param trust the evaluated SecTrust object
+     * @return the validated certificate path, or nil if it is not available
+     */
+    static func evaluatedCertificateChain(from trust: SecTrust) -> [SecCertificate]? {
+        if #available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *) {
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], !chain.isEmpty else {
+                return nil
+            }
+            return chain
+        }
+        let count = SecTrustGetCertificateCount(trust)
+        guard count > 0 else {
+            return nil
+        }
+        var chain: [SecCertificate] = []
+        for index in 0..<count {
+            guard let certificate = SecTrustGetCertificateAtIndex(trust, index) else {
+                return nil
+            }
+            chain.append(certificate)
+        }
+        return chain
     }
 
     /**
