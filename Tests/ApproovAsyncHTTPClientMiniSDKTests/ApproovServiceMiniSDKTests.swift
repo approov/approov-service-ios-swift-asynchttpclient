@@ -576,6 +576,21 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §5 Message Signing
 
+    func testTargetUriOmitsFragment() throws {
+        let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: "https://example.com/p?q=1#frag")), method: "GET", headers: HTTPHeaders()))
+        // SPECIFICATION 3.3: the target URI as the stack sends it, without the fragment.
+        XCTAssertEqual(provider.getTargetUri(), "https://example.com/p?q=1")
+    }
+
+    func testPathIsSlashWhenURLPathIsEmpty() throws {
+        let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: "https://example.com")), method: "GET", headers: HTTPHeaders()))
+        // RFC 9421 section 2.2.6. AsyncHTTPClient also sends "/".
+        XCTAssertEqual(provider.getPath(), "/")
+        XCTAssertEqual(provider.getRequestTarget(), "/")
+    }
+
     func testUpdateRequestInstallMessageSigningAddsSignatureHeaders() throws {
         try reinitializeServiceWithTargetHost()
 

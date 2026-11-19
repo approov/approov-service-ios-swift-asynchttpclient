@@ -574,7 +574,12 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
     }
 
     public func getTargetUri() -> String {
-        return request.url.absoluteString
+        // SPECIFICATION 3.3: the URL as the stack sends it. A fragment is never sent, so remove it.
+        let uri = request.url.absoluteString
+        if let fragmentStart = uri.firstIndex(of: "#") {
+            return String(uri[..<fragmentStart])
+        }
+        return uri
     }
 
     public func getRequestTarget() -> String {
@@ -592,7 +597,8 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
            !encodedPath.isEmpty {
             return encodedPath
         }
-        return request.url.path
+        // RFC 9421 section 2.2.6: an empty path is "/". AsyncHTTPClient also sends "/".
+        return "/"
     }
 
     public func getQuery() -> String {
