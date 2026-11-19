@@ -1073,6 +1073,30 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    func testAsyncBodyDigestCoversBytesFromReaderIndex() async throws {
+        try reinitializeServiceWithTargetHost()
+        let factory = try ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setBodyDigestConfig(ApproovDefaultMessageSigning.DIGEST_SHA256, required: true)
+        ApproovService.setServiceMutator(ApproovDefaultMessageSigning().setDefaultFactory(factory))
+
+        var buffer = ByteBuffer(string: "XXXXpayload")
+        buffer.moveReaderIndex(forwardBy: 4) // AsyncHTTPClient sends only "payload"
+        var request = HTTPClientRequest(url: targetURLString)
+        request.method = .POST
+        request.body = .bytes(buffer)
+
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+        let response = try await client.execute(request, timeout: .seconds(30))
+        var collected = ByteBuffer()
+        for try await var part in response.body {
+            collected.writeBuffer(&part)
+        }
+        let reply = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(collected.readableBytesView)) as? [String: Any])
+        let expected = Data(SHA256.hash(data: Data("payload".utf8))).base64EncodedString()
+        XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), "sha-256=:\(expected):")
+    }
+
     func testAsyncBodyDigestBehavior() async throws {
         try reinitializeServiceWithTargetHost()
         

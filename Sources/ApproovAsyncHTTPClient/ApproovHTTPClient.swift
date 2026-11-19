@@ -578,7 +578,7 @@ extension ApproovHTTPClient {
                     continue
                 }
                 if caseLabel == "byteBuffer", let byteBuffer = modeMirror.children.first?.value as? ByteBuffer {
-                    return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                    return byteBuffer.getData(at: byteBuffer.readerIndex, length: byteBuffer.readableBytes)
                 } else if caseLabel == "sequence" {
                     let associatedValue = modeMirror.children.first!.value
                     let assocMirror = Mirror(reflecting: associatedValue)
@@ -606,7 +606,7 @@ extension ApproovHTTPClient {
                     if canBeConsumedMultipleTimes, let closure = closure {
                         let allocator = ByteBufferAllocator()
                         let byteBuffer = closure(allocator)
-                        return byteBuffer.getData(at: 0, length: byteBuffer.readableBytes)
+                        return byteBuffer.getData(at: byteBuffer.readerIndex, length: byteBuffer.readableBytes)
                     }
                 }
             }
