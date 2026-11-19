@@ -25,6 +25,7 @@ import NIOEmbedded
 import Foundation
 import NIOConcurrencyHelpers
 import NIOHTTP1
+import NIOPosix
 import NIOSSL
 import os.log
 
@@ -444,58 +445,83 @@ public class ApproovService {
         }
     }
     
+    /// Event loop for body writes that arrive from another thread or after `extractBodyData` returned.
+    /// NIO permits `EmbeddedEventLoop` only on the thread that created it, so such a write gets its
+    /// future from this loop. The group has one thread, created on first use.
+    private static let lateBodyWriteGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+
     /**
      * Extracts the body data from an AsyncHTTPClient `HTTPClient.Body` for body-digest computation.
      *
-     * `HTTPClient.Body` is opaque: unlike the async `HTTPClientRequest.Body` it exposes no flag
-     * indicating whether it can be consumed more than once. To avoid corrupting one-shot or
-     * asynchronous streaming uploads, the body is only buffered when it can be read non-destructively
-     * and completely: its stream closure is invoked on an isolated `EmbeddedEventLoop` and the
-     * resulting future must complete synchronously. In-memory bodies (`.byteBuffer`, `.bytes`,
-     * `.string`) satisfy this and still re-stream correctly at execution time, because reading the
-     * buffered copy does not advance the original. Chunked / one-shot / asynchronous streaming bodies
-     * are skipped (returns nil) so the request proceeds without a body digest rather than being
-     * silently truncated or consumed — matching the documented "gracefully skip one-shot uploads"
-     * behaviour for body digests.
+     * `HTTPClient.Body` is opaque. It gives no flag that tells if the body is in memory. This function
+     * calls the stream closure once, on a private `EmbeddedEventLoop`, and uses the data only if all of
+     * it arrives on this thread before the closure's future completes. In-memory bodies (`.byteBuffer`,
+     * `.bytes`, `.string`) do this. A body of unknown length (chunked) is skipped and its closure is not
+     * called. A write from another thread, or after this function returned, is ignored, and the body is
+     * not digested.
+     *
+     * The closure runs one more time when AsyncHTTPClient sends the request. AsyncHTTPClient also runs it
+     * again for a 307 or 308 redirect. So the closure must be repeatable: each call must write the same
+     * bytes.
      *
      * - Parameter body: the request body to inspect.
-     * - Returns: the complete body bytes if they could be buffered non-destructively; otherwise nil.
+     * - Returns: the complete body bytes if they arrived synchronously; otherwise nil.
      */
     static func extractBodyData(from body: HTTPClient.Body?) -> Data? {
         guard let body = body else {
             return nil
         }
 
-        // A nil length indicates a chunked / streaming body of unknown size; treat it as one-shot and
-        // skip it so we never start consuming an unrepeatable source.
+        // A nil length indicates a chunked / streaming body of unknown size; skip it without calling it.
         if body.length == nil {
             return nil
         }
 
+        // All state is behind a lock, because the producer can write from another thread.
+        let state = NIOLockedValueBox((data: Data(), undigestable: false, closed: false))
+        let ownerThread = pthread_self()
         let eventLoop = EmbeddedEventLoop()
-        var accumulated = Data()
-        var unsupportedChunk = false
-        let writer = HTTPClient.Body.StreamWriter { ioData in
-            switch ioData {
-            case .byteBuffer(let buffer):
-                accumulated.append(contentsOf: buffer.readableBytesView)
-            default:
-                // File regions and other chunk kinds cannot be digested in-memory.
-                unsupportedChunk = true
+        // Weak capture: a producer can keep the writer after this function returns. A strong capture
+        // would then release the EmbeddedEventLoop on the producer thread, which NIO reports as misuse.
+        let writer = HTTPClient.Body.StreamWriter { [weak eventLoop] ioData in
+            let onOwnerThread = pthread_equal(pthread_self(), ownerThread) != 0
+            let accepted = state.withLockedValue { current -> Bool in
+                guard onOwnerThread, !current.closed else {
+                    // A late or foreign-thread write: the body is not complete in memory.
+                    current.undigestable = true
+                    return false
+                }
+                switch ioData {
+                case .byteBuffer(let buffer):
+                    current.data.append(contentsOf: buffer.readableBytesView)
+                default:
+                    // File regions and other chunk kinds cannot be digested in memory.
+                    current.undigestable = true
+                }
+                return true
             }
-            return eventLoop.makeSucceededFuture(())
+            // An accepted write is on the owner thread while this function runs, so the loop exists.
+            if accepted, let eventLoop = eventLoop {
+                return eventLoop.makeSucceededFuture(())
+            }
+            return lateBodyWriteGroup.next().makeSucceededFuture(())
         }
 
-        var completedSynchronously = false
-        let future = body.stream(writer)
-        future.whenComplete { _ in completedSynchronously = true }
+        let completed = NIOLockedValueBox(false)
+        body.stream(writer).whenComplete { _ in
+            completed.withLockedValue { $0 = true }
+        }
         eventLoop.run()
 
-        guard completedSynchronously, !unsupportedChunk else {
-            // Streaming / asynchronous body: do not digest a partial or consumed body.
+        let data = state.withLockedValue { current -> Data? in
+            current.closed = true
+            return current.undigestable ? nil : current.data
+        }
+        guard completed.withLockedValue({ $0 }) else {
+            // Streaming / asynchronous body: do not digest a partial body.
             return nil
         }
-        return accumulated
+        return data
     }
 
     private static func applyMutatorError(_ error: Error,

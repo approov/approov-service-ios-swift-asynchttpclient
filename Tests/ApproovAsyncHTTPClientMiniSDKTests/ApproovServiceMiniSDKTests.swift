@@ -9,6 +9,8 @@ import Approov
 import MiniSDKTestSupport
 import CryptoKit
 import NIOEmbedded
+import NIOPosix
+import NIOConcurrencyHelpers
 
 /// Integration tests for the ApproovService AsyncHTTPClient service layer.
 final class ApproovServiceMiniSDKTests: XCTestCase {
@@ -661,6 +663,25 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     func testExtractBodyDataReturnsNilForNoBody() {
         XCTAssertNil(ApproovService.extractBodyData(from: nil))
+    }
+
+    func testExtractBodyDataLateWriteDoesNotUseEmbeddedEventLoop() throws {
+        let producerGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? producerGroup.syncShutdownGracefully() }
+        let lateWrite = NIOLockedValueBox<EventLoopFuture<Void>?>(nil)
+        // An asynchronous producer: it writes 20 ms later, from its own thread.
+        let body = HTTPClient.Body.stream(length: 5) { writer in
+            producerGroup.next().scheduleTask(in: .milliseconds(20)) {
+                lateWrite.withLockedValue { $0 = writer.write(.byteBuffer(ByteBuffer(string: "hello"))) }
+            }.futureResult
+        }
+
+        XCTAssertNil(ApproovService.extractBodyData(from: body), "an asynchronous body is not digested")
+        Thread.sleep(forTimeInterval: 0.2)
+        let future = try XCTUnwrap(lateWrite.withLockedValue { $0 }, "control: the producer wrote")
+        XCTAssertFalse(future.eventLoop is EmbeddedEventLoop,
+                       "A late write must not use the EmbeddedEventLoop from another thread")
+        XCTAssertNoThrow(try future.wait())
     }
 
     func testBodyDigestEnabledAddsContentDigestComponent() throws {
