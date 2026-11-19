@@ -470,45 +470,6 @@ public class ApproovHTTPClient {
             throw ApproovError.permanentError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
         }
     }
-
-    /// Update a request for Approov
-    private static func approovUpdateRequest(
-        url: String,
-        method: HTTPMethod,
-        body: HTTPClient.Body?
-    ) throws -> HTTPClient.Request {
-        guard let reqURL = URL(string: url) else {
-            throw HTTPClientError.invalidURL
-        }
-        let bodyData = ApproovService.extractBodyData(from: body)
-
-        let approovReq = ApproovRequest(
-            url: reqURL,
-            method: method.rawValue,
-            headers: HTTPHeaders(),
-            body: bodyData
-        )
-        
-        let response = ApproovService.updateRequestWithApproov(request: approovReq)
-        if let error = response.error {
-            throw error
-        }
-        
-        switch response.decision {
-        case .ShouldProceed, .ShouldIgnore:
-            return try HTTPClient.Request(
-                url: response.request.url,
-                method: method,
-                headers: response.request.headers,
-                body: body,
-                tlsConfiguration: nil
-            )
-        case .ShouldRetry:
-            throw ApproovError.networkingError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
-        case .ShouldFail:
-            throw ApproovError.permanentError(message: "Token fetch for \(reqURL.host ?? ""): \(response.sdkMessage)")
-        }
-    }
 }
 
 // Based on https://github.com/swift-server/async-http-client/tree/main/Sources/AsyncHTTPClient/AsyncAwait/HTTPClient+execute.swift

@@ -790,8 +790,9 @@ public class ApproovService {
                                         updateURL = URL(string: updateURLString)
                                         if updateURL == nil {
                                             response.decision = .ShouldFail
+                                            // Do not put the URL in the message: it contains the secure string.
                                             response.error = ApproovError.permanentError(
-                                                message: "Query parameter substitution for \(entry): malformed URL \(updateURLString)")
+                                                message: "Query parameter substitution for \(entry): the substituted URL is not valid")
                                             return response
                                         }
                                     }
