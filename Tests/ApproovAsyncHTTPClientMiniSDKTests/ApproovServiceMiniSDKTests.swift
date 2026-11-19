@@ -534,6 +534,22 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                       "A managed trust root pin must match the root that trust evaluation added")
     }
 
+    func testPerRequestTLSWithoutFullVerificationIsRejected() throws {
+        try reinitializeServiceWithTargetHost()
+        var tls = TLSConfiguration.makeClientConfiguration()
+        tls.certificateVerification = .none
+        let request = try HTTPClient.Request(url: XCTUnwrap(URL(string: targetURLString)), method: .GET,
+                                             headers: HTTPHeaders(), body: nil, tlsConfiguration: tls)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+
+        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
+            guard case ApproovError.configurationError = error else {
+                return XCTFail("Expected ApproovError.configurationError, got \(error)")
+            }
+        }
+    }
+
     // MARK: - §5 Message Signing
 
     func testUpdateRequestInstallMessageSigningAddsSignatureHeaders() throws {

@@ -432,6 +432,15 @@ public class ApproovHTTPClient {
 
     /// Update a request for Approov
     private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
+        // In the Approov AsyncHTTPClient fork, a TLS configuration without full verification completes the
+        // handshake without the Approov pin check. Reject it, so that one request option cannot disable pinning.
+        if let tlsConfiguration = request.tlsConfiguration,
+           tlsConfiguration.certificateVerification != .fullVerification,
+           ApproovService.isApproovEnabled() {
+            throw ApproovError.configurationError(message:
+                "Request TLS configuration for \(request.url.host ?? ""): certificateVerification must be "
+                + ".fullVerification, because Approov pinning does not run otherwise")
+        }
         let bodyData = ApproovService.extractBodyData(from: request.body)
         
         let approovReq = ApproovRequest(
