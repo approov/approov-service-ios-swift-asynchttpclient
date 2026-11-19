@@ -473,26 +473,26 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     }
 
     func testPinningFailureTriggersPinningError() throws {
+        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
+
+        // Control: with the default pins, the host is reachable.
+        try reinitializeServiceWithTargetHost()
+        let controlClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? controlClient.syncShutdown() }
+        XCTAssertNoThrow(try controlClient.execute(request: request).wait(), "control: the host is reachable")
+
+        // Both entries carry the invalid pin. At initialization the mini SDK empties the pins of the
+        // TESTING_REPLY_URL host, so "*" applies. After a token fetch it uses the scenario pins as written,
+        // so the host entry applies. A host that is not a key of the pins map is unpinned.
+        // A new client makes sure that no pooled connection skips the handshake.
         let targetHost = try XCTUnwrap(URL(string: targetURLString)?.host)
         try reinitializeServiceWithTargetHost(scenarioBody: """
-            "pins": {
-              "public-key-sha256": {
-                "*": ["invalid-pin-base64="],
-                "\(targetHost)": ["invalid-pin-base64="]
-              }
-            }
+            "pins": { "public-key-sha256": { "*": ["invalid-pin-base64="], "\(targetHost)": ["invalid-pin-base64="] } }
             """)
-
-        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
-        defer {
-            try? client.syncShutdown()
-        }
-
-        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
-        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
-            // Should fail with standard NIO-SSL connection aborted or TLS pinning verification failure
-            XCTAssertNotNil(error)
-        }
+        let pinnedClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? pinnedClient.syncShutdown() }
+        // AsyncHTTPClient 1.10.2 reports the pin rejection as HTTPClientError.connectTimeout after 30 s.
+        XCTAssertThrowsError(try pinnedClient.execute(request: request).wait())
     }
 
     // Trust evaluation date for the recorded certificates (2026-11-19T00:00:00Z).
