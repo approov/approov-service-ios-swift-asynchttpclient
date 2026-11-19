@@ -525,7 +525,9 @@ extension ApproovHTTPClient {
         deadline: NIODeadline,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
-        let updatedRequest = try await ApproovHTTPClient.approovUpdateRequest(request: request)
+        let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
+            try ApproovHTTPClient.approovUpdateRequest(request: request)
+        }
         return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
     }
 
@@ -541,12 +543,24 @@ extension ApproovHTTPClient {
         timeout: TimeAmount,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
-        let updatedRequest = try await ApproovHTTPClient.approovUpdateRequest(request: request)
+        let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
+            try ApproovHTTPClient.approovUpdateRequest(request: request)
+        }
         return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
     }
 
+    /// Runs blocking Approov work on a Dispatch queue. The token fetch blocks its thread, and the Swift
+    /// concurrency pool has about one thread for each CPU core, so this work must not run on that pool.
+    private static func runOffCooperativePool<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
     /// Update a request for Approov
-    private static func approovUpdateRequest(request: HTTPClientRequest) async throws -> HTTPClientRequest {
+    private static func approovUpdateRequest(request: HTTPClientRequest) throws -> HTTPClientRequest {
         guard let url = URL(string: request.url) else {
             throw HTTPClientError.invalidURL
         }

@@ -404,6 +404,30 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    /// Records the Dispatch queue label of the thread that runs the interceptor.
+    private final class QueueLabelRecorder: ApproovServiceMutator {
+        let label = NIOLockedValueBox<String?>(nil)
+        func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool {
+            let current = String(cString: __dispatch_queue_get_label(nil))
+            label.withLockedValue { $0 = current }
+            return true
+        }
+    }
+
+    func testAsyncExecuteRunsApproovUpdateOffCooperativePool() async throws {
+        try reinitializeServiceWithTargetHost()
+        let recorder = QueueLabelRecorder()
+        ApproovService.setServiceMutator(recorder)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+
+        _ = try await client.execute(HTTPClientRequest(url: targetURLString), timeout: .seconds(30))
+
+        let label = try XCTUnwrap(recorder.label.withLockedValue { $0 }, "control: the interceptor ran")
+        XCTAssertFalse(label.contains("cooperative"),
+                       "The blocking Approov update ran on the Swift concurrency pool: \(label)")
+    }
+
     // MARK: - §3 Service Mutators & Decision Overrides
 
     struct AlwaysProceedMutator: ApproovServiceMutator {
