@@ -32,6 +32,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - **Breaking:** a connection that Approov pinning rejects fails with `URLError(.serverCertificateUntrusted)`, with the AsyncHTTPClient error as the underlying error. It still fails at the connect deadline (`HTTPClient.Configuration.timeout.connect`), because AsyncHTTPClient retries the connection until then.
 - **Breaking:** while Approov protection is on, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when pinning cannot run: an event loop group that is not a NIOTS group, a `delegateAndChannel` event loop that is not a NIOTS loop, or a client or request TLS configuration without `.fullVerification`.
 - A host with no pins and no Managed Trust Roots now connects on OS trust, with one warning for each host while the pins do not change. Pin lookup ignores case and a trailing dot. A connection without SNI (to an IP address) no longer fails, unless an IP address has Approov pins.
+- `ApproovHTTPClient` follows redirects itself, with the app's `redirectConfiguration`. The wrapped `HTTPClient` never follows one. Each hop is the app's request for its target, protected as a new request under the service mutator that the request started with: a token fetched for the target, the target's pins, secure strings only on a protected channel, and signatures over the new method and target. Nothing that the layer added reaches another origin. The target URL is used exactly as the server sent it, and its query values are never looked up.
+- A request that the layer already protected (for example `signRequest` output passed to `ApproovHTTPClient`) is put back as the app wrote it before it is protected again.
 - Refactored `ApproovService` to handle multi-threaded state access safely with locks.
 - Changed Package.swift to swift-tools-version 5.8 with support for structured headers, exact SDK dependencies, and conditional local Mini-SDK path setup.
 - `Package.swift` `releaseTAG` is now a `dev` placeholder, stamped with the release version by the `tag-release` CI job at tag time (was a hardcoded literal), keeping it in lock-step with the runtime user-property string.
@@ -40,6 +42,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Deprecated
 - `ApproovDefaultMessageSigning.processedRequest`. Use `handleInterceptorProcessedRequest`.
 - `ApproovServiceMutatorDefault`. Use `ApproovCloseFailureMutator.DEFAULT` or `.CLOSE_FAILURE`.
+- `signRequest(_:)` and `updateRequest(url:headers:)`. A plain `HTTPClient` follows a redirect with the protection that they add, also to another host. Use `ApproovHTTPClient`.
 - `loggingLevel`, `approovTokenHeaderAndPrefix`, `getApproovTokenHeader()`, `setApproovTraceIDHeader(header:)`, `getApproovTraceIDHeader()` and `getMessageSignature(message:)`.
 
 ### Removed
@@ -48,6 +51,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Fixed
 - Pinning now matches pins only against the certificate path that trust evaluation built. A decoy certificate that the server appends no longer satisfies a pin, and a managed trust root pin (`*`) now matches when the server does not send its root. The URLSession layer pins the same path.
 - A request whose own `tlsConfiguration` does not use `.fullVerification` now fails with `URLError(.unknown)` when Approov is enabled. Before, it completed the TLS handshake without the Approov pin check.
+- A redirect no longer carries the Approov token, the trace ID, the signatures, `Content-Digest` or substituted secure strings to the next hop. Before, AsyncHTTPClient followed the redirect with all of them, also to another host.
+- A redirect hop keeps the request's own `tlsConfiguration`. AsyncHTTPClient dropped it.
 - `ApproovHTTPClient.EventLoopPreference(_:)` now keeps the event loop of a `.delegate(on:)` or `.delegateAndChannel(on:)` preference. Before, it changed every such preference to `.indifferent`, so the delegate ran on an event loop that the caller did not ask for.
 - The async `execute` functions now run the Approov update on a global Dispatch queue. Before, the blocking token fetch ran on the Swift concurrency pool and could stop all async work in the app on a slow network.
 - The body digest for the async API now reads the body from `readerIndex`. Before, a buffer with a moved `readerIndex` gave no `Content-Digest`, or a failure when the digest was required.

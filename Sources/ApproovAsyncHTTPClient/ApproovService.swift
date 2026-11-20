@@ -440,6 +440,7 @@ public class ApproovService {
     /**
      * Legacy backward-compatible updateRequest method.
      */
+    @available(*, deprecated, message: "A plain HTTPClient follows a redirect with this request's Approov protection, which can then reach another host. Use ApproovHTTPClient, which protects each redirect hop as a new request.")
     public static func updateRequest(url: URL, headers: HTTPHeaders) throws -> (URL, HTTPHeaders) {
         let appReq = ApproovRequest(url: url, method: "GET", headers: headers, body: nil)
         let response = updateRequestWithApproov(request: appReq)
@@ -456,6 +457,7 @@ public class ApproovService {
         }
     }
 
+    @available(*, deprecated, message: "A plain HTTPClient follows a redirect with this request's Approov protection, which can then reach another host. Use ApproovHTTPClient, which protects each redirect hop as a new request.")
     public static func signRequest(_ request: HTTPClient.Request) throws -> HTTPClient.Request {
         let bodyData = extractBodyData(from: request.body)
         let approovReq = ApproovRequest(
