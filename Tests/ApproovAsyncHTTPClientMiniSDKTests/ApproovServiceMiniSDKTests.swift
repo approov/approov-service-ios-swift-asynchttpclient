@@ -1573,6 +1573,26 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(debugLines.contains { $0.1.contains("header-secret") }, "no line carries a secret")
     }
 
+    private final class SwitchingMutator: ApproovServiceMutator {
+        func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+            ApproovService.setServiceMutator(ApproovAlwaysProceedMutator.ALWAYS_PROCEED)
+            return true
+        }
+        func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+            var marked = request
+            marked.headers.replaceOrAdd(name: "X-Mutator", value: "first")
+            return marked
+        }
+    }
+
+    func testOneRequestOneMutator() throws {
+        try reinitializeServiceWithTargetHost()
+        let response = try decide(targetURLString, mutator: SwitchingMutator())
+        XCTAssertEqual(response.request.headers.first(name: "X-Mutator"), "first",
+                       "a mutator change during a request does not reach that request (SPEC 6.5)")
+        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovAlwaysProceedMutator, "control: the change applies later")
+    }
+
     // MARK: - §5.10 Logging
 
     func testLoggingOffSilencesTheLayer() throws {
