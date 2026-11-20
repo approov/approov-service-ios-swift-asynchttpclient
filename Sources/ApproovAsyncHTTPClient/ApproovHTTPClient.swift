@@ -531,14 +531,35 @@ extension ApproovHTTPClient {
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
         try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
-        let start = ProcessInfo.processInfo.systemUptime
-        let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
-            try ApproovHTTPClient.approovUpdateRequest(request: request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
-        }
-        do {
-            return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
-        } catch {
-            throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: updatedRequest.url)?.host, since: start)
+        // One request, one mutator (SPEC 6.5), and each hop is the app's request for its URL (SPEC 7.3).
+        let mutator = ApproovService.getServiceMutator()
+        var tracker = redirectPolicy.map { ApproovRedirectTracker(policy: $0, initialURL: request.url) }
+        var hop = ApproovClientRequestHop(request: request, substituteQuery: true)
+        while true {
+            let start = ProcessInfo.processInfo.systemUptime
+            let current = hop
+            let wireRequest = try await ApproovHTTPClient.runOffCooperativePool {
+                try ApproovHTTPClient.approovUpdateRequest(request: current.request, mutator: mutator,
+                                                           substituteQuery: current.substituteQuery)
+            }
+            let response: HTTPClientResponse
+            do {
+                response = try await httpClientDelegate.execute(wireRequest, deadline: deadline, logger: logger)
+            } catch {
+                throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: wireRequest.url)?.host, since: start)
+            }
+            guard var followed = tracker, let wireURL = URL(string: wireRequest.url),
+                  let target = ApproovRedirects.target(status: response.status, headers: response.headers, from: wireURL) else {
+                return response
+            }
+            try followed.redirect(to: target.absoluteString)
+            tracker = followed
+            let next = hop.following(status: response.status, to: target, wireURL: wireURL)
+            // As in AsyncHTTPClient, a body that can be sent only once ends the chain with the redirect response.
+            guard ApproovRedirects.canBeSentAgain(next.request.body) else {
+                return response
+            }
+            hop = next
         }
     }
 
@@ -554,16 +575,7 @@ extension ApproovHTTPClient {
         timeout: TimeAmount,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
-        try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
-        let start = ProcessInfo.processInfo.systemUptime
-        let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
-            try ApproovHTTPClient.approovUpdateRequest(request: request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
-        }
-        do {
-            return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
-        } catch {
-            throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: updatedRequest.url)?.host, since: start)
-        }
+        return try await execute(request, deadline: .now() + timeout, logger: logger)
     }
 
     /// Runs blocking Approov work on a Dispatch queue. The token fetch blocks its thread, and the Swift

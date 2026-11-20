@@ -1280,6 +1280,47 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    // T37-13, T37-13a, T37-25 on the async API. A body that can be sent only once is not sent again.
+    func testAsyncAPIFollowsRedirectsAsNewRequests() throws {
+        try redirectScenario()
+        let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        let location = "https://\(unprotected)/landing-async?k=query-key"
+        let url = try redirectURL(to: location, status: 307)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+
+        var request = HTTPClientRequest(url: url)
+        request.method = .POST
+        request.headers = HTTPHeaders([("Api-Key", "Bearer header-key")])
+        request.body = .bytes(ByteBuffer(string: "payload"))
+        MiniSDKAttesterProxyController.clearCallLog()
+        let sent = request
+        let followed = try blockingResult { () -> (UInt, Data) in
+            let response = try await client.execute(sent, timeout: .seconds(20))
+            var data = Data()
+            for try await buffer in response.body {
+                data.append(contentsOf: buffer.readableBytesView)
+            }
+            return (response.status.code, data)
+        }.get()
+        XCTAssertEqual(followed.0, 200)
+        let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: followed.1) as? [String: Any])
+        XCTAssertEqual(reply["url"] as? String, location, "T37-13a")
+        XCTAssertEqual(reply["body"] as? String, "payload")
+        XCTAssertNil(getHeader(from: reply, key: "Approov-Token"))
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "T37-25")
+        XCTAssertFalse(MiniSDKAttesterProxyController.callLog().contains("fetchSecureStringAndWait:query-key"))
+
+        var streamed = request
+        streamed.body = .stream(AsyncStream<ByteBuffer> { continuation in
+            continuation.yield(ByteBuffer(string: "payload"))
+            continuation.finish()
+        }, length: .known(7))
+        let once = streamed
+        let status = try blockingResult { try await client.execute(once, timeout: .seconds(20)).status.code }.get()
+        XCTAssertEqual(status, 307, "a body that can be sent only once is not sent again, as in AsyncHTTPClient")
+    }
+
     // MARK: - §5 Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
