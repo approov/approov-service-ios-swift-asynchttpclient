@@ -985,6 +985,131 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    // MARK: - §7 Redirects
+
+    func testRedirectPolicyIsReadFromTheConfiguration() {
+        XCTAssertNil(ApproovRedirectPolicy.of(.disallow))
+        XCTAssertEqual(ApproovRedirectPolicy.of(HTTPClient.Configuration().redirectConfiguration),
+                       ApproovRedirectPolicy(max: 5, allowCycles: false))
+        XCTAssertEqual(ApproovRedirectPolicy.of(.follow(max: 2, allowCycles: true)),
+                       ApproovRedirectPolicy(max: 2, allowCycles: true))
+        let lines = captureLogs(level: .error) { _ = ApproovRedirectPolicy.of(.follow(max: 3, allowCycles: false)) }
+        XCTAssertTrue(lines.isEmpty, "the configuration is read, not guessed: \(lines)")
+    }
+
+    func testRedirectTrackerKeepsTheAppsLimits() {
+        var two = ApproovRedirectTracker(policy: ApproovRedirectPolicy(max: 2, allowCycles: false), initialURL: "https://h/0")
+        XCTAssertNoThrow(try two.redirect(to: "https://h/1"))
+        XCTAssertNoThrow(try two.redirect(to: "https://h/2"))
+        XCTAssertThrowsError(try two.redirect(to: "https://h/3")) {
+            XCTAssertEqual($0 as? HTTPClientError, .redirectLimitReached)
+        }
+        var noCycles = ApproovRedirectTracker(policy: ApproovRedirectPolicy(max: 5, allowCycles: false), initialURL: "https://h/0")
+        XCTAssertThrowsError(try noCycles.redirect(to: "https://h/0")) {
+            XCTAssertEqual($0 as? HTTPClientError, .redirectCycleDetected)
+        }
+        var cycles = ApproovRedirectTracker(policy: ApproovRedirectPolicy(max: 5, allowCycles: true), initialURL: "https://h/0")
+        XCTAssertNoThrow(try cycles.redirect(to: "https://h/0"))
+    }
+
+    func testRedirectTargetFollowsAsyncHTTPClientRules() throws {
+        let from = try XCTUnwrap(URL(string: "https://h.example/a/b?q=1"))
+        func target(_ status: HTTPResponseStatus, _ location: String?) -> String? {
+            var headers = HTTPHeaders()
+            if let location {
+                headers.add(name: "Location", value: location)
+            }
+            return ApproovRedirects.target(status: status, headers: headers, from: from)?.absoluteString
+        }
+        XCTAssertEqual(target(.found, "/x?k=v"), "https://h.example/x?k=v", "resolved against the request URL")
+        XCTAssertEqual(target(.temporaryRedirect, "https://o.example/y"), "https://o.example/y")
+        XCTAssertEqual(target(.movedPermanently, "http://h.example/z"), "http://h.example/z")
+        XCTAssertNil(target(.ok, "/x"), "not a redirect status")
+        XCTAssertNil(target(.found, nil), "no Location")
+        XCTAssertNil(target(.found, "ftp://h.example/f"), "not an http or https target")
+        XCTAssertNil(target(.found, "file:///etc/hosts"))
+        let followed: [HTTPResponseStatus] = [.movedPermanently, .found, .seeOther, .notModified, .useProxy,
+                                              .temporaryRedirect, .permanentRedirect]
+        for status in followed {
+            XCTAssertNotNil(target(status, "/x"), "\(status.code)")
+        }
+    }
+
+    func testRedirectTransformFollowsAsyncHTTPClientRules() throws {
+        let from = try XCTUnwrap(URL(string: "https://h.example/a"))
+        let sameOrigin = try XCTUnwrap(URL(string: "https://h.example/b"))
+        let otherOrigin = try XCTUnwrap(URL(string: "https://o.example/b"))
+        let headers = HTTPHeaders([("Content-Type", "text/plain"), ("Content-Length", "7"), ("Authorization", "a"),
+                                   ("Cookie", "c"), ("Origin", "o"), ("Proxy-Authorization", "p"),
+                                   ("Api-Key", "Bearer header-key")])
+        let seeOther = ApproovRedirects.transform(method: .POST, headers: headers, from: from, to: sameOrigin, status: .seeOther)
+        XCTAssertEqual(seeOther.method, .GET)
+        XCTAssertFalse(seeOther.keepsBody)
+        XCTAssertNil(seeOther.headers.first(name: "Content-Type"))
+        XCTAssertNil(seeOther.headers.first(name: "Content-Length"))
+        XCTAssertEqual(seeOther.headers.first(name: "Authorization"), "a", "same origin keeps the app's credentials")
+        XCTAssertEqual(ApproovRedirects.transform(method: .HEAD, headers: headers, from: from, to: sameOrigin,
+                                                  status: .seeOther).method, .HEAD)
+        XCTAssertEqual(ApproovRedirects.transform(method: .POST, headers: headers, from: from, to: sameOrigin,
+                                                  status: .movedPermanently).method, .GET)
+        XCTAssertEqual(ApproovRedirects.transform(method: .PUT, headers: headers, from: from, to: sameOrigin,
+                                                  status: .found).method, .PUT)
+        let temporary = ApproovRedirects.transform(method: .POST, headers: headers, from: from, to: otherOrigin,
+                                                   status: .temporaryRedirect)
+        XCTAssertEqual(temporary.method, .POST)
+        XCTAssertTrue(temporary.keepsBody)
+        for name in ["Authorization", "Cookie", "Origin", "Proxy-Authorization"] {
+            XCTAssertNil(temporary.headers.first(name: name), name)
+        }
+        XCTAssertEqual(temporary.headers.first(name: "Api-Key"), "Bearer header-key", "the app's placeholder header is kept")
+    }
+
+    func testRedirectHopIsBuiltFromTheAppsRequest() throws {
+        var tls = TLSConfiguration.makeClientConfiguration()
+        tls.minimumTLSVersion = .tlsv13
+        let app = try HTTPClient.Request(url: XCTUnwrap(URL(string: "https://h.example/p?k=query-key")), method: .POST,
+                                         headers: HTTPHeaders([("Api-Key", "Bearer header-key")]),
+                                         body: .string("payload"), tlsConfiguration: tls)
+        let hop = ApproovRequestHop(request: app, substituteQuery: true)
+        let wire = try XCTUnwrap(URL(string: "https://h.example/p?k=query-secret"))
+
+        // The server redirects to the URL that was sent: the app's URL, with its placeholders, is protected again.
+        let same = try hop.following(status: .temporaryRedirect, to: wire, wireURL: wire)
+        XCTAssertEqual(same.request.url.absoluteString, "https://h.example/p?k=query-key")
+        XCTAssertTrue(same.substituteQuery)
+        XCTAssertNotNil(same.request.body)
+
+        // Any other target is used exactly as the server sent it, and its query is never looked up (T37-13a).
+        let echoed = try XCTUnwrap(URL(string: "https://o.example/q?k=query-secret"))
+        let other = try hop.following(status: .seeOther, to: echoed, wireURL: wire)
+        XCTAssertEqual(other.request.url, echoed)
+        XCTAssertFalse(other.substituteQuery)
+        XCTAssertEqual(other.request.method, .GET)
+        XCTAssertNil(other.request.body)
+        XCTAssertEqual(other.request.headers.first(name: "Api-Key"), "Bearer header-key", "the app's header, never the layer's")
+        XCTAssertEqual(other.request.tlsConfiguration?.minimumTLSVersion, .tlsv13, "the request's TLS configuration is kept")
+
+        // The async request hop follows the same rules.
+        var asyncApp = HTTPClientRequest(url: "https://h.example/p?k=query-key")
+        asyncApp.method = .POST
+        asyncApp.headers = HTTPHeaders([("Api-Key", "Bearer header-key")])
+        let asyncHop = ApproovClientRequestHop(request: asyncApp, substituteQuery: true)
+        XCTAssertEqual(asyncHop.following(status: .temporaryRedirect, to: wire, wireURL: wire).request.url,
+                       "https://h.example/p?k=query-key")
+        let asyncOther = asyncHop.following(status: .seeOther, to: echoed, wireURL: wire)
+        XCTAssertEqual(asyncOther.request.url, echoed.absoluteString)
+        XCTAssertFalse(asyncOther.substituteQuery)
+        XCTAssertEqual(asyncOther.request.method, .GET)
+    }
+
+    func testOnlyARepeatableAsyncBodyIsSentAgain() {
+        XCTAssertTrue(ApproovRedirects.canBeSentAgain(nil))
+        XCTAssertTrue(ApproovRedirects.canBeSentAgain(.bytes(ByteBuffer(string: "payload"))))
+        XCTAssertTrue(ApproovRedirects.canBeSentAgain(.bytes(Array("payload".utf8))))
+        XCTAssertFalse(ApproovRedirects.canBeSentAgain(.bytes(AnySequence(Array("payload".utf8)), length: .known(7))))
+        XCTAssertFalse(ApproovRedirects.canBeSentAgain(.stream(AsyncStream<ByteBuffer> { $0.finish() }, length: .known(0))))
+    }
+
     // MARK: - §5 Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
