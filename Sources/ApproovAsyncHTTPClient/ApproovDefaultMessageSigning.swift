@@ -124,7 +124,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
      */
     public func processedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
         // If the request doesn't have an Approov token, we don't need to sign it
-        if request.headers.first(name: ApproovService.getApproovTokenHeader()) != nil {
+        if request.headers.first(name: ApproovService.getTokenHeader()) != nil {
             // Generate and add a message signature
             let provider = ApproovAsyncHTTPClientComponentProvider(request: request)
             guard let params = try buildSignatureParameters(provider: provider, changes: changes) else {

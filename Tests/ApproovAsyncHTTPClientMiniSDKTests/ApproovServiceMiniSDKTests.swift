@@ -452,6 +452,21 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(result.token.isEmpty)
     }
 
+    func testCommonHeaderNamesSetAndGetTheHeaders() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setTokenHeader(header: "X-Approov", prefix: nil)
+        XCTAssertEqual(ApproovService.getTokenHeader(), "X-Approov")
+        XCTAssertEqual(ApproovService.getTokenPrefix(), "", "a nil prefix means no prefix, never \"null\"")
+        ApproovService.setTokenHeader(header: "Authorization", prefix: "Bearer ")
+        XCTAssertEqual(ApproovService.getTokenPrefix(), "Bearer ")
+        ApproovService.setTraceIDHeader(header: nil)
+        XCTAssertNil(ApproovService.getTraceIDHeader())
+
+        let reply = fetchNetworkReply(for: try HTTPClient.Request(url: targetURLString, method: .GET))
+        XCTAssertTrue(try XCTUnwrap(getHeader(from: reply, key: "Authorization")).hasPrefix("Bearer "))
+        XCTAssertNil(getHeader(from: reply, key: "Approov-TraceID"), "a nil trace header is disabled")
+    }
+
     func testGetLastARCMakesNoFetchAndReturnsTheLastFetchARC() throws {
         try reinitializeServiceWithTargetHost()
         XCTAssertEqual(ApproovService.getLastARC(), "", "no fetch since initialization")
@@ -957,8 +972,8 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     func testCustomTokenAndTraceHeaderNamesAndPrefixes() throws {
         try reinitializeServiceWithTargetHost()
         
-        ApproovService.approovTokenHeaderAndPrefix = (approovTokenHeader: "Custom-Token", approovTokenPrefix: "CustomPrefix ")
-        ApproovService.setApproovTraceIDHeader(header: "Custom-TraceID")
+        ApproovService.setTokenHeader(header: "Custom-Token", prefix: "CustomPrefix ")
+        ApproovService.setTraceIDHeader(header: "Custom-TraceID")
         
         let request = try HTTPClient.Request(url: targetURLString, method: .GET)
         let protectedReply = fetchNetworkReply(for: request)
@@ -970,7 +985,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNotNil(getHeader(from: protectedReply, key: "Custom-TraceID"))
         
         // Test null/nil prefix treated as empty string
-        ApproovService.approovTokenHeaderAndPrefix = (approovTokenHeader: "Custom-Token", approovTokenPrefix: "")
+        ApproovService.setTokenHeader(header: "Custom-Token", prefix: nil)
         let reply2 = fetchNetworkReply(for: request)
         let customToken2 = getHeader(from: reply2, key: "Custom-Token")
         XCTAssertFalse(customToken2?.hasPrefix("null") ?? true)

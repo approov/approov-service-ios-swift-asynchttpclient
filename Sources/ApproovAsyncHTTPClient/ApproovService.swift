@@ -336,33 +336,52 @@ public class ApproovService {
         }
     }
 
-    /**
-     * Sets the header that the Approov token is added on, as well as an optional prefix String.
-     */
-    public static var approovTokenHeaderAndPrefix: (approovTokenHeader: String, approovTokenPrefix: String) {
-        get {
-            stateLock.withLock { (_approovTokenHeader, _approovTokenPrefix) }
+    /** Sets the header that carries the Approov token, and an optional prefix such as "Bearer " (SPEC 5.1) */
+    public static func setTokenHeader(header: String, prefix: String?) {
+        stateLock.withLock {
+            _approovTokenHeader = header
+            _approovTokenPrefix = prefix ?? ""
         }
-        set {
-            stateLock.withLock {
-                _approovTokenHeader = newValue.approovTokenHeader
-                _approovTokenPrefix = newValue.approovTokenPrefix
-            }
-        }
+        log(.debug, "ApproovService: setTokenHeader: \(header) \(prefix ?? "")")
     }
 
-    public static func getApproovTokenHeader() -> String {
+    public static func getTokenHeader() -> String {
         stateLock.withLock { _approovTokenHeader }
     }
 
-    public static func setApproovTraceIDHeader(header: String?) {
-        stateLock.withLock {
-            _approovTraceIDHeader = header
-        }
+    public static func getTokenPrefix() -> String {
+        stateLock.withLock { _approovTokenPrefix }
     }
 
-    public static func getApproovTraceIDHeader() -> String? {
+    /** Sets the header that carries the Approov trace ID. Nil disables it (SPEC 5.1). */
+    public static func setTraceIDHeader(header: String?) {
+        stateLock.withLock { _approovTraceIDHeader = header }
+        log(.debug, "ApproovService: setTraceIDHeader: \(header ?? "nil")")
+    }
+
+    public static func getTraceIDHeader() -> String? {
         stateLock.withLock { _approovTraceIDHeader }
+    }
+
+    @available(*, deprecated, message: "Use setTokenHeader(header:prefix:), getTokenHeader() and getTokenPrefix().")
+    public static var approovTokenHeaderAndPrefix: (approovTokenHeader: String, approovTokenPrefix: String) {
+        get { (getTokenHeader(), getTokenPrefix()) }
+        set { setTokenHeader(header: newValue.approovTokenHeader, prefix: newValue.approovTokenPrefix) }
+    }
+
+    @available(*, deprecated, renamed: "getTokenHeader()")
+    public static func getApproovTokenHeader() -> String {
+        getTokenHeader()
+    }
+
+    @available(*, deprecated, renamed: "setTraceIDHeader(header:)")
+    public static func setApproovTraceIDHeader(header: String?) {
+        setTraceIDHeader(header: header)
+    }
+
+    @available(*, deprecated, renamed: "getTraceIDHeader()")
+    public static func getApproovTraceIDHeader() -> String? {
+        getTraceIDHeader()
     }
 
     public static func setUseApproovStatusIfNoToken(shouldUse: Bool) {
