@@ -6,70 +6,45 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [3.7.0] - Unreleased
 
-### Added
-- `SignatureParametersFactory.setUseInstallAndAccountMessageSigning()` signs with the install and the account key, as two members of one `Signature` dictionary. The default factory signs with the install key only.
-- `ApproovService.getServerAdjustedCurrentTimeMS()` gives the time adjusted to the Approov servers' clock.
-- `ApproovCloseFailureMutator.CLOSE_FAILURE` (the default), `ApproovAlwaysProceedMutator.ALWAYS_PROCEED` and `DEFAULT`, the named service mutators.
-- `setLoggingLevel(_:)` sets the logging level. `OFF` silences the layer.
-- `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()`, `setTraceIDHeader(header:)` and `getTraceIDHeader()`, the header names that every 3.7.x layer uses.
-- `isApproovServiceEnabled()`, `isApproovProtectionEnabled()` and `setInstallAttributes(_:)`.
-- Completed full integration of Approov service layer v3 features: service mutator, bypass mode, trace ID, fallback token, secure string/query parameter substitutions, HTTP message signing (RFC 9421 signature builders and default request signers), and dynamic TLS pinning.
-- Added localized testing framework with a full 35-test suite utilizing the native Mini-SDK.
-- Excluded vendored message signing license files from the target build source to prevent SwiftPM warnings.
+Changes since 3.5.3. Entries marked **Breaking** need a source change.
 
 ### Changed
-- Message signature `created` and `expires` follow the Approov servers' clock, so a device with a wrong clock still signs inside the backend's window.
-- A request that proceeds after a token fetch failure is signed over its token header (empty, or the status). Only the token header that the layer added is signed: a token header the app set itself is not.
-- With both signatures selected, a signature that cannot be produced is left out and the other is sent.
-- `@authority` is the lowercase host with a non-default port. A host factory matches the host without regard to case or a trailing dot.
-- **Breaking:** a token fetch failure for a host that is not an Approov API domain no longer fails the request: it goes out untouched. A failure that proceeds to an API domain carries the token header with an empty token, or the status with `setUseApproovStatusIfNoToken`, and the trace header when the SDK supplied one.
-- **Breaking:** a secure string fetch never fails the request. A status other than `SUCCESS` is written into the placeholder, keeping a required prefix. Secure strings are substituted only on https to an API domain, including a secrets-only API (`UNPROTECTED_URL`). Every occurrence of a substitution query parameter is substituted.
-- **Breaking:** an error that a service mutator hook throws is a `URLError`: a `URLError` passes unchanged, and any other error becomes `URLError(.unknown)` with the original as the underlying error. The `CLOSE_FAILURE` decisions keep `ApproovError`. A required body digest that cannot be generated and an unsupported signature algorithm fail with `URLError(.unknown)`.
-- Error messages name the status as the SDK enum does (`REJECTED`, `NO_NETWORK`).
-- `getLastARC()` returns the ARC of the last fetch the layer made and makes no fetch of its own.
-- **Breaking:** `getMessageSignature(message:)` returns `String?` and no longer throws. It returns the account signature, as `getAccountMessageSignature` does.
-- The token and the secure string log lines are written at DEBUG only, and log lines no longer carry a URL query, a fragment or a pin.
-- **Breaking:** a connection that Approov pinning rejects fails with `URLError(.serverCertificateUntrusted)`, with the AsyncHTTPClient error as the underlying error. It still fails at the connect deadline (`HTTPClient.Configuration.timeout.connect`), because AsyncHTTPClient retries the connection until then.
-- **Breaking:** while Approov protection is on, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when pinning cannot run: an event loop group that is not a NIOTS group, a `delegateAndChannel` event loop that is not a NIOTS loop, or a client or request TLS configuration without `.fullVerification`.
-- A host with no pins and no Managed Trust Roots now connects on OS trust, with one warning for each host while the pins do not change. Pin lookup ignores case and a trailing dot. A connection without SNI (to an IP address) no longer fails, unless an IP address has Approov pins.
-- `ApproovHTTPClient` follows redirects itself, with the app's `redirectConfiguration`. The wrapped `HTTPClient` never follows one. Each hop is the app's request for its target, protected as a new request under the service mutator that the request started with: a token fetched for the target, the target's pins, secure strings only on a protected channel, and signatures over the new method and target. Nothing that the layer added reaches another origin. The target URL is used exactly as the server sent it, and its query values are never looked up.
-- A request that the layer already protected (for example `signRequest` output passed to `ApproovHTTPClient`) is put back as the app wrote it before it is protected again.
-- Refactored `ApproovService` to handle multi-threaded state access safely with locks.
-- Changed Package.swift to swift-tools-version 5.8 with support for structured headers, exact SDK dependencies, and conditional local Mini-SDK path setup.
-- `Package.swift` `releaseTAG` is now a `dev` placeholder, stamped with the release version by the `tag-release` CI job at tag time (was a hardcoded literal), keeping it in lock-step with the runtime user-property string.
-- Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
+- **Breaking:** `getDeviceID()` returns `String?` and no longer throws.
+- **Breaking:** While Approov is enabled, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when it cannot validate the connection: an event loop group that is not a `NIOTSEventLoopGroup`, a `delegateAndChannel` event loop that is not a NIOTS loop, or a client or request TLS configuration without `.fullVerification`. See [connection validation](ADVANCED.md#connection-validation).
+- A connection that fails validation fails with `URLError(.serverCertificateUntrusted)` instead of `HTTPClientError.connectTimeout`. It still fails at the connect timeout.
+- Hosts in the pin set are matched regardless of case and a trailing dot. A domain with no keys and no Managed Trust Roots connects on OS trust, with one warning. A connection to an IP address no longer fails, unless an IP address has keys configured.
+- A failed token fetch only affects requests to your Approov API domains. A request to any other host is sent unchanged. A request that proceeds carries an empty token header, or the status name with `setUseApproovStatusIfNoToken(true)`, and the trace header when the SDK gives one.
+- A failed secure string fetch no longer fails the request. The status name replaces the placeholder, such as `Api-Key: REJECTED`. Secure strings are substituted only on https to an Approov API domain, also one added with `-noApproovToken`. Every occurrence of a substitution query parameter is substituted.
+- Error messages name the status as the SDK does, such as `REJECTED` or `NO_NETWORK`.
+- `getLastARC()` returns the ARC of the last fetch the package made and makes no fetch of its own.
+- `ApproovHTTPClient` follows redirects itself, with your `redirectConfiguration`, and protects each hop as a new request for its target. Nothing the package added reaches another origin. See [redirects](ADVANCED.md#redirects).
+- A request that the package already protected, such as `signRequest` output, is put back as your app wrote it before it is protected again.
+- The async `execute` functions do the Approov work off the Swift concurrency pool.
+- Log lines follow `setLoggingLevel`. The loggable token and secure string results are logged at `DEBUG` only, and no log line carries a URL query, a fragment or a key value.
+- WebSockets are not supported. A request with `Upgrade: websocket` is sent unchanged. See [WebSockets](ADVANCED.md#websockets).
+
+### Added
+- Service mutators: `setServiceMutator(_:)`, `getServiceMutator()`, `ApproovCloseFailureMutator.CLOSE_FAILURE` (the default), `ApproovAlwaysProceedMutator.ALWAYS_PROCEED` and `DEFAULT`. See [service mutators](ADVANCED.md#service-mutators).
+- HTTP message signing (RFC 9421) with `ApproovDefaultMessageSigning` and `SignatureParametersFactory`, including `setUseInstallAndAccountMessageSigning()`. Signature times follow the Approov servers' clock. See [message signing](ADVANCED.md#message-signing).
+- `setUseApproovStatusIfNoToken(shouldUse:)` and `getUseApproovStatusIfNoToken()`.
+- `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()`, `setTraceIDHeader(header:)` and `getTraceIDHeader()`.
+- `setLoggingLevel(_:)` and `ApproovLogLevel`. `OFF` silences the package.
+- `isApproovServiceEnabled()`, `isApproovProtectionEnabled()`, `setInstallAttributes(_:)`, `getServerAdjustedCurrentTimeMS()`, `getAccountMessageSignature(message:)` and `getInstallMessageSignature(message:)`.
+- `getSubstitutionHeaders()`, `getSubstitutionQueryParams()` and `getExclusionURLRegexs()`.
+- `updateRequestWithApproov(request:)` and `signRequest(_:)`, for a transport that owns its own client.
+- Bypass mode: `initialize(config: "")` sends requests without Approov protection.
 
 ### Deprecated
-- `ApproovDefaultMessageSigning.processedRequest`. Use `handleInterceptorProcessedRequest`.
-- `ApproovServiceMutatorDefault`. Use `ApproovCloseFailureMutator.DEFAULT` or `.CLOSE_FAILURE`.
-- `signRequest(_:)` and `updateRequest(url:headers:)`. A plain `HTTPClient` follows a redirect with the protection that they add, also to another host. Use `ApproovHTTPClient`.
-- `loggingLevel`, `approovTokenHeaderAndPrefix`, `getApproovTokenHeader()`, `setApproovTraceIDHeader(header:)`, `getApproovTraceIDHeader()` and `getMessageSignature(message:)`.
+- `approovTokenHeaderAndPrefix`. Use `setTokenHeader(header:prefix:)`, `getTokenHeader()` and `getTokenPrefix()`.
+- `getMessageSignature(message:)`, which now returns `String?` and no longer throws. Use `getAccountMessageSignature(message:)`.
+- `updateRequest(url:headers:)`. A plain `HTTPClient` follows a redirect with the protection it adds. Use `ApproovHTTPClient`.
 
 ### Removed
-- **Breaking:** `prefetch()`, `proceedOnNetworkFail` and `setFailureCacheTTL(ttl:)`. The layer no longer caches token fetch failures. To proceed on a network failure, use a service mutator.
+- **Breaking:** `prefetch()` and `proceedOnNetworkFail`. To send requests after a network failure, use `setServiceMutator(.ALWAYS_PROCEED)`.
+- **Breaking:** `substituteQueryParam(url:queryParameter:)`. Call `addSubstitutionQueryParam(key:)`, and the package substitutes the parameter in each request.
 
 ### Fixed
-- Pinning now matches pins only against the certificate path that trust evaluation built. A decoy certificate that the server appends no longer satisfies a pin, and a managed trust root pin (`*`) now matches when the server does not send its root. The URLSession layer pins the same path.
-- A request whose own `tlsConfiguration` does not use `.fullVerification` now fails with `URLError(.unknown)` when Approov is enabled. Before, it completed the TLS handshake without the Approov pin check.
-- A redirect no longer carries the Approov token, the trace ID, the signatures, `Content-Digest` or substituted secure strings to the next hop. Before, AsyncHTTPClient followed the redirect with all of them, also to another host.
-- A redirect hop keeps the request's own `tlsConfiguration`. AsyncHTTPClient dropped it.
-- `ApproovHTTPClient.EventLoopPreference(_:)` now keeps the event loop of a `.delegate(on:)` or `.delegateAndChannel(on:)` preference. Before, it changed every such preference to `.indifferent`, so the delegate ran on an event loop that the caller did not ask for.
-- The async `execute` functions now run the Approov update on a global Dispatch queue. Before, the blocking token fetch ran on the Swift concurrency pool and could stop all async work in the app on a slow network.
-- The body digest for the async API now reads the body from `readerIndex`. Before, a buffer with a moved `readerIndex` gave no `Content-Digest`, or a failure when the digest was required.
-- A stream body that writes from another thread, or after the digest extraction returned, no longer uses the `EmbeddedEventLoop` off its thread, which NIO reports as API misuse. Such a body is not digested. A body closure must be repeatable, because AsyncHTTPClient also calls it again on a 307 or 308 redirect.
-- `@target-uri` no longer includes a `#fragment`, and `@path` is `/` for a URL with no path.
-- The query parameter substitution error no longer includes the URL, which contained the secure string.
-- Message signing now fully conforms to the cross-layer fail-open policy (core-project-approov#564): a signature-base build failure and a `Signature`/`Signature-Input` serialization failure now log at error level and proceed **unsigned** instead of aborting the request, matching the existing install/account/base64/ASN.1 fail-open paths. Only a required body digest that cannot be generated and an unsupported algorithm still fail closed.
-- Documented the dynamic pinning update model in `REFERENCE.md`: pins are enforced per TLS handshake and apply immediately to all new connections, while connections already pooled under a previous pin set are re-pinned when they cycle.
-- Body digest computation for the `EventLoopFuture` (`HTTPClient.Request`) API now buffers multi-chunk in-memory bodies in full; previously the `signRequest` path retained only the final chunk, producing an incorrect `Content-Digest`.
-- One-shot and chunked streaming request bodies are now skipped for body-digest computation rather than being consumed or partially digested, so streaming uploads are no longer corrupted and signing proceeds without a body digest. Body extraction for the synchronous API is consolidated into a single shared implementation.
-- `setBodyDigestConfig(nil, required:)` now fully disables body-digest generation; previously a digest algorithm configured earlier (including the default factory's SHA-256) persisted and digests continued to be generated.
-- Closed a race in `ApproovHTTPClient.Task` where a `cancel()` arriving while the request was being set up could be lost, allowing the request to execute uncancelled. The wrapped task is now stored and re-checked for cancellation under a single lock.
-- `fetchToken`, `fetchSecureString`, `fetchCustomJWT`, and `precheck` now guarantee that only `ApproovError` escapes: an error thrown by a custom service mutator is wrapped as `ApproovError.permanentError`, matching the documented throwing contract.
-- Invalid exclusion URL regular expressions passed to `addExclusionURLRegex` are now logged at error level (the exclusion is not registered), rather than being discarded with only a debug-level message.
-- Message signing now uses `replaceOrAdd` for the `Signature`, `Signature-Input`, `Signature-Base-Digest`, and `Content-Digest` headers so that re-processing a request cannot emit duplicate header lines.
-- RFC 9421 derived `@path` / `@request-target` components now use the on-wire percent-encoded path rather than the percent-decoded `URL.path`, so the server reconstructs the same signature base.
-- Logging now distinguishes "service layer not initialized" from "initialized in bypass mode (empty config)" when an Approov-dependent method is invoked while the SDK is inactive.
-
-### Documentation
-- `REFERENCE.md`: documented that automatic (`bindHeader`) and manual (`setDataHashInToken`) token binding must not be mixed, that `precheck()` is intended for development-time verification (and throws `ApproovError`), and that the legacy `updateRequest(url:headers:)` overload assumes `GET` with no body.
+- Connection validation now matches only the certificate path that trust evaluation built. An unused certificate that a server adds no longer passes it, and a Managed Trust Roots key matches when the server does not send its root.
+- A request TLS configuration without `.fullVerification` no longer skips connection validation.
+- `ApproovHTTPClient.EventLoopPreference(_:)` keeps the event loop of a `.delegate(on:)` or `.delegateAndChannel(on:)` preference.
+- A `cancel()` that arrived while a request was being set up could be lost.

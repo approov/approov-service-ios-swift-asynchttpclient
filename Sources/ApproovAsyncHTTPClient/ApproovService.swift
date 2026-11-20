@@ -251,7 +251,7 @@ public class ApproovService {
 
             approovSDKInitialised = true
             if isEnabled {
-                Approov.setUserProperty("approov-service-asynchttpclient/dev")
+                Approov.setUserProperty("approov-service-asynchttpclient/3.7.0")
             }
             TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
         }
