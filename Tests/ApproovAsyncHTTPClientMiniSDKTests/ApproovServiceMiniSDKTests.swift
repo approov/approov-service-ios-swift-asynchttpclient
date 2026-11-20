@@ -1010,13 +1010,16 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     func testRepeatedReinitAndOptionsCommentBehavior() throws {
         try reinitializeServiceWithTargetHost()
-        
-        // Initial setup with options: comment
-        try ApproovService.initialize(config: validInitialConfig, comment: "options:test-option")
-        XCTAssertTrue(ApproovService.isInitialized())
-        
-        // Repeated setup with reinit... comment should be forwarded and succeed
-        try ApproovService.initialize(config: validInitialConfig, comment: "reinit-options")
+
+        // SPEC 5.7(a): the SDK refuses a different comment, and the layer returns that error unchanged.
+        XCTAssertThrowsError(try ApproovService.initialize(config: validInitialConfig, comment: "options:test-option")) { error in
+            guard case ApproovError.initializationFailure = error else {
+                return XCTFail("Expected initializationFailure, got \(error)")
+            }
+        }
+
+        // A "reinit" comment is accepted again.
+        XCTAssertNoThrow(try ApproovService.initialize(config: validInitialConfig, comment: "reinit-options"))
         XCTAssertTrue(ApproovService.isInitialized())
     }
 
@@ -1359,6 +1362,10 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     private func reinitializeService(scenarioJSON: String? = nil, comment: String) throws {
         MiniSDKAttesterProxyController.reset()
+        // The SDK reads options only on the first initialization of a process.
+        if comment.hasPrefix("options:") {
+            MiniSDKAttesterProxyController.resetSdkForTesting()
+        }
         if let scenarioJSON {
             MiniSDKAttesterProxyController.loadScenarioJSON(scenarioJSON)
         }
