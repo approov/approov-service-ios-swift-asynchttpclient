@@ -613,6 +613,32 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    func testCallHookPassesURLErrorAndWrapsOthers() throws {
+        struct AppError: Error {}
+        XCTAssertThrowsError(try ApproovRequestPathError.callHook("hook") { throw URLError(.cancelled) }) { error in
+            XCTAssertEqual((error as? URLError)?.code, .cancelled, "an app abort with a URLError passes through")
+        }
+        XCTAssertThrowsError(try ApproovRequestPathError.callHook("hook") { throw AppError() }) { error in
+            XCTAssertEqual((error as? URLError)?.code, .unknown)
+            XCTAssertTrue((error as NSError).userInfo[NSUnderlyingErrorKey] is AppError, "the original is the cause")
+        }
+        XCTAssertThrowsError(try ApproovRequestPathError.callHook("hook") {
+            throw ApproovError.permanentError(message: "app")
+        }) { error in
+            XCTAssertEqual((error as? URLError)?.code, .unknown, "an ApproovError the app threw is a hook failure (1.6.1)")
+        }
+        XCTAssertThrowsError(try ApproovRequestPathError.callHook("hook") {
+            throw ApproovStandardDecisions.made(.permanentError(message: "standard"))
+        }) { error in
+            guard case ApproovError.permanentError = error else {
+                return XCTFail("a standard decision keeps its ApproovError, got \(error)")
+            }
+        }
+        XCTAssertNil(try ApproovRequestPathError.callHookIgnoringStandardDecisions("hook") { () -> Bool in
+            throw ApproovStandardDecisions.made(.networkingError(message: "standard"))
+        }, "a standard decision is ignored where the standard decisions do not apply")
+    }
+
     // MARK: - §3 Service Mutators & Decision Overrides
 
     struct AlwaysProceedMutator: ApproovServiceMutator {

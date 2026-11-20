@@ -178,7 +178,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             default:
                 // Unsupported algorithm is a configuration error and is the one signing failure (with a
                 // required body digest) that fails closed.
-                throw ApproovError.permanentError(message: "Unsupported algorithm identifier: \(params.getAlg() ?? "unknown")")
+                throw ApproovRequestPathError.configuration("Unsupported algorithm identifier: \(params.getAlg() ?? "unknown")")
             }
 
             // Create signature headers. Serialization failure (a thrown error or a nil result) is
@@ -474,7 +474,7 @@ public class SignatureParametersFactory {
         if bodyDigestAlgorithm != nil {
             let bodyDigestCreated = try generateBodyDigest(provider: provider, requestParameters: requestParameters)
             if !bodyDigestCreated && bodyDigestRequired {
-                throw ApproovError.permanentError(message: "Failed to create required body digest")
+                throw ApproovRequestPathError.configuration("Failed to create required body digest")
             }
         }
 
