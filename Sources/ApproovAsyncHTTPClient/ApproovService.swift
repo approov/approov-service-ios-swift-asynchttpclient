@@ -559,25 +559,19 @@ public class ApproovService {
         return data
     }
 
-    private static func applyMutatorError(_ error: Error,
-                                          response: inout ApproovUpdateResponse,
-                                          context: String) {
-        if let approovError = error as? ApproovError {
-            response.error = approovError
-            switch approovError {
-            case .networkingError:
-                response.decision = .ShouldRetry
-            default:
-                response.decision = .ShouldFail
-            }
+    /// Maps an error from a hook call to the decision: a standard decision keeps its ApproovError, with a retry
+    /// for a network failure; any other error is already a URLError and fails the request.
+    private static func applyMutatorError(_ error: Error, response: inout ApproovUpdateResponse) {
+        response.error = error
+        if case .networkingError? = error as? ApproovError {
+            response.decision = .ShouldRetry
         } else {
-            response.error = ApproovError.permanentError(message: "\(context): \(error.localizedDescription)")
             response.decision = .ShouldFail
         }
     }
 
     /**
-     * Modern mutator-integrated updateRequestWithApproov method.
+     * Adds Approov protection to a request, as the service mutator decides (SPEC 1, 6).
      */
     public static func updateRequestWithApproov(request: ApproovRequest) -> ApproovUpdateResponse {
         let url = request.url
@@ -588,200 +582,297 @@ public class ApproovService {
             return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
         }
 
+        // One request, one mutator (SPEC 6.5): it is read once and used for every hook of this request.
         let mutator = getServiceMutator()
         do {
-            if try !mutator.handleInterceptorShouldProcessRequest(request) {
+            if try !ApproovRequestPathError.callHook("handleInterceptorShouldProcessRequest", {
+                try mutator.handleInterceptorShouldProcessRequest(request)
+            }) {
                 log(.info, "ApproovService: excluded, forwarding: \(loggableURL(url))")
                 return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
             }
         } catch {
             var response = ApproovUpdateResponse(request: request, decision: .ShouldFail, sdkMessage: "", error: nil)
-            applyMutatorError(error, response: &response, context: "Interceptor should process request")
+            applyMutatorError(error, response: &response)
             return response
         }
 
-        // we construct a response to return
         var response = ApproovUpdateResponse(request: request, decision: .ShouldFail, sdkMessage: "", error: nil)
 
-        // get all of the headers
-        let allHeaders = request.headers
-
-        // check if Bind Header is set to a non empty String
-        let bindHeader = stateLock.withLock {
-            return _bindHeader
-        }
-        if bindHeader != "" {
-            if let value = allHeaders.first(name: bindHeader) {
-                Approov.setDataHashInToken(value)
-            }
+        let bindHeader = stateLock.withLock { _bindHeader }
+        if bindHeader != "", let value = request.headers.first(name: bindHeader) {
+            Approov.setDataHashInToken(value)
         }
 
-        // Fetch an Approov token
         let approovResult = Approov.fetchTokenAndWait(url.absoluteString)
         recordLastARC(approovResult)
-        let hostname = url.host ?? ""
         log(.debug, "ApproovService: updateRequest \(loggableURL(url)): \(approovResult.loggableToken())")
         if approovResult.isConfigChanged {
             Approov.fetchConfig()
             log(.info, "ApproovService: dynamic configuration update received")
         }
-
         response.sdkMessage = Approov.string(from: approovResult.status)
 
-        var hasChanges = false
-        var setTokenHeaderKey: String?
-        var setTokenHeaderValue: String?
-        var setTraceIDHeaderKey: String?
-        var setTraceIDHeaderValue: String?
+        // A protected channel, which can carry secrets, is a token-protected API (SUCCESS) or a secrets-only API
+        // (UNPROTECTED_URL) over https. Any other status but UNKNOWN_URL is a failure status, which says nothing
+        // about the host, so there the pin set decides (SPEC 1.3, 1.5).
+        let status = approovResult.status
+        let isHTTPS = url.scheme?.lowercased() == "https"
+        let isFailure = status != .success && status != .unprotectedURL && status != .unknownURL
+        let isProtectedChannel = isHTTPS && (status == .success || status == .unprotectedURL)
 
-        do {
-            let shouldAddToken = try mutator.handleInterceptorFetchTokenResult(approovResult, url: url.absoluteString)
-            response.decision = .ShouldProceed
-            if !shouldAddToken {
+        // A failure for a host that is not listed goes out untouched. A standard decision is ignored, and only the
+        // app's own throw aborts it (SPEC 1.3).
+        if isFailure && !isListedHost(url.host) {
+            do {
+                _ = try ApproovRequestPathError.callHookIgnoringStandardDecisions("handleInterceptorFetchTokenResult") {
+                    try mutator.handleInterceptorFetchTokenResult(approovResult, url: url.absoluteString)
+                }
+            } catch {
+                applyMutatorError(error, response: &response)
                 return response
             }
-        } catch {
-            applyMutatorError(error, response: &response, context: "Approov token fetch")
+            log(.debug, "ApproovService: \(loggableURL(url)) proceeds untouched after \(statusName(status)), host not listed")
+            warnOfPlaceholdersLeft(in: request, isHTTPS: isHTTPS, status: status)
+            response.decision = .ShouldProceed
             return response
         }
 
-        let tokenHeader = stateLock.withLock {
-            return _approovTokenHeader
+        let shouldAddToken: Bool
+        do {
+            shouldAddToken = try ApproovRequestPathError.callHook("handleInterceptorFetchTokenResult") {
+                try mutator.handleInterceptorFetchTokenResult(approovResult, url: url.absoluteString)
+            }
+        } catch {
+            applyMutatorError(error, response: &response)
+            return response
         }
-        let tokenPrefix = stateLock.withLock {
-            return _approovTokenPrefix
+        response.decision = .ShouldProceed
+        if isFailure {
+            log(.debug, "ApproovService: \(loggableURL(url)) proceeds after \(statusName(status)), ARC: \(approovResult.arc), reasons: \(approovResult.rejectionReasons)")
         }
-        hasChanges = true
-        setTokenHeaderKey = tokenHeader
-        if approovResult.token.isEmpty && (stateLock.withLock { _useApproovStatusIfNoToken }) {
-            setTokenHeaderValue = tokenPrefix + response.sdkMessage
-        } else {
-            setTokenHeaderValue = tokenPrefix + approovResult.token
+        if !isProtectedChannel {
+            warnOfPlaceholdersLeft(in: request, isHTTPS: isHTTPS, status: status)
         }
-        let traceID = approovResult.traceID
-        if let traceHeader = stateLock.withLock({ _approovTraceIDHeader }),
-           !traceHeader.isEmpty {
-            hasChanges = true
-            setTraceIDHeaderKey = traceHeader
-            setTraceIDHeaderValue = traceID
+        if !shouldAddToken && !isProtectedChannel {
+            return response
         }
 
-        // deal with header substitutions
-        var setSubstitutionHeaders: [String: String] = [:]
-        let subsHeadersCopy = getSubstitutionHeaders()
-        for (header, prefix) in subsHeadersCopy {
-            if let value = allHeaders.first(name: header) {
-                if ((value.hasPrefix(prefix)) && (value.count > prefix.count)) {
-                    let lookupKey = String(value.dropFirst(prefix.count))
-                    let approovResults = Approov.fetchSecureStringAndWait(lookupKey, nil)
-                    recordLastARC(approovResults)
-                    log(.debug, "ApproovService: Substituting header: \(header), \(Approov.string(from: approovResults.status))")
-
-                    do {
-                        if try mutator.handleInterceptorHeaderSubstitutionResult(approovResults, header: header) {
-                            if let secureStringResult = approovResults.secureString {
-                                if !secureStringResult.isEmpty {
-                                    hasChanges = true
-                                    setSubstitutionHeaders[header] = prefix + secureStringResult
-                                }
-                            } else {
-                                response.decision = .ShouldFail
-                                response.error = ApproovError.permanentError(message: "Header substitution: key lookup error")
-                                return response
-                            }
-                        }
-                    } catch {
-                        applyMutatorError(error, response: &response, context: "Header substitution for \(header)")
-                        return response
-                    }
+        // The token and trace headers. After a failure the token header holds an empty token, or the status name
+        // with setUseApproovStatusIfNoToken (SPEC 1.3, 4.1).
+        if shouldAddToken && status != .unknownURL && status != .unprotectedURL {
+            let (tokenHeader, tokenPrefix, useStatus, traceHeader) = stateLock.withLock {
+                (_approovTokenHeader, _approovTokenPrefix, _useApproovStatusIfNoToken, _approovTraceIDHeader)
+            }
+            let token = (approovResult.token.isEmpty && useStatus) ? statusName(status) : approovResult.token
+            guard isHeaderCarriable(tokenPrefix) else {
+                response.decision = .ShouldFail
+                response.error = ApproovRequestPathError.configuration("Approov header \(tokenHeader): invalid character in the token prefix")
+                return response
+            }
+            guard isHeaderCarriable(token) else {
+                response.decision = .ShouldFail
+                response.error = ApproovRequestPathError.sdkValue("token", header: tokenHeader)
+                return response
+            }
+            response.request.headers.replaceOrAdd(name: tokenHeader, value: tokenPrefix + token)
+            changes.setTokenHeaderKey(tokenHeader)
+            let traceID = approovResult.traceID
+            if let traceHeader, !traceHeader.isEmpty, !traceID.isEmpty {
+                guard isHeaderCarriable(traceID) else {
+                    response.decision = .ShouldFail
+                    response.error = ApproovRequestPathError.sdkValue("trace ID", header: traceHeader)
+                    return response
                 }
+                response.request.headers.replaceOrAdd(name: traceHeader, value: traceID)
+                changes.setTraceIDHeaderKey(traceHeader)
             }
         }
 
-        // deal with query parameter substitutions
-        var updateURL: URL?
-        var queryKeys: [String] = []
-        let subsQueryParamsCopy = getSubstitutionQueryParams()
-        var updateURLString = url.absoluteString
-        for entry in subsQueryParamsCopy {
-            let urlStringRange = NSRange(updateURLString.startIndex..<updateURLString.endIndex, in: updateURLString)
-            let escapedEntry = NSRegularExpression.escapedPattern(for: entry)
-            guard let regex = try? NSRegularExpression(pattern: #"[\\?&]"# + escapedEntry + #"=([^&;]+)"#, options: []) else {
+        // Secure strings only on a protected channel (SPEC 1.4, 1.5).
+        if isProtectedChannel {
+            do {
+                try substituteHeaders(&response.request, mutator: mutator, changes: changes)
+                try substituteQueryParams(&response.request, mutator: mutator, changes: changes)
+            } catch {
+                applyMutatorError(error, response: &response)
+                return response
+            }
+        }
+
+        do {
+            response.request = try ApproovRequestPathError.callHook("handleInterceptorProcessedRequest") {
+                try mutator.handleInterceptorProcessedRequest(response.request, changes: changes)
+            }
+        } catch {
+            applyMutatorError(error, response: &response)
+            return response
+        }
+        return response
+    }
+
+    /// True if the host is a key of the pins map other than "*" (SPEC 1.3), compared as pins are looked up.
+    static func isListedHost(_ host: String?) -> Bool {
+        guard let host = host, let pins = Approov.getPins("public-key-sha256") else {
+            return false
+        }
+        let wanted = normalisedHost(host)
+        return pins.keys.contains { $0 != "*" && normalisedHost($0) == wanted }
+    }
+
+    /// A host as pins are looked up: lowercase, with one trailing dot removed (SPEC 2.6).
+    static func normalisedHost(_ host: String) -> String {
+        var normalised = host.lowercased()
+        if normalised.hasSuffix(".") {
+            normalised.removeLast()
+        }
+        return normalised
+    }
+
+    /// True if a header can carry the value unchanged: tab and printable ASCII only (SPEC 1.4).
+    static func isHeaderCarriable(_ value: String) -> Bool {
+        return value.unicodeScalars.allSatisfy { $0 == "\t" || ($0.value >= 0x20 && $0.value <= 0x7E) }
+    }
+
+    /// Logs a warning for each placeholder that stays on a request that is not https or whose token fetch
+    /// returned BAD_URL (SPEC 1.5). It names the header or query parameter, never a value.
+    private static func warnOfPlaceholdersLeft(in request: ApproovRequest, isHTTPS: Bool, status: ApproovTokenFetchStatus) {
+        guard !isHTTPS || status == .badURL else {
+            return
+        }
+        let reason = isHTTPS ? "BAD_URL" : "not https"
+        for (header, _) in getSubstitutionHeaders() where request.headers.first(name: header) != nil {
+            log(.warning, "ApproovService: secure string header \(header) not substituted: \(reason)")
+        }
+        let present = Set(queryOccurrences(in: request.url.absoluteString).map { $0.name })
+        for key in getSubstitutionQueryParams() where present.contains(key) {
+            log(.warning, "ApproovService: secure string query parameter \(key) not substituted: \(reason)")
+        }
+    }
+
+    private static func substituteHeaders(_ request: inout ApproovRequest, mutator: ApproovServiceMutator,
+                                          changes: ApproovRequestMutations) throws {
+        var substituted: [String] = []
+        for (header, prefix) in getSubstitutionHeaders() {
+            guard let value = request.headers.first(name: header), value.hasPrefix(prefix), value.count > prefix.count else {
                 continue
             }
-            let matches: [NSTextCheckingResult] = regex.matches(in: updateURLString, options: [], range: urlStringRange)
-            for match: NSTextCheckingResult in matches.reversed() {
-                for rangeIndex in (1..<match.numberOfRanges).reversed() {
-                    let matchRange = match.range(at: rangeIndex)
-                    if let substringRange = Range(matchRange, in: updateURLString) {
-                        let queryValue = String(updateURLString[substringRange])
-                        let approovResults = Approov.fetchSecureStringAndWait(String(queryValue), nil)
-                        recordLastARC(approovResults)
-                        log(.debug, "ApproovService: Attempting query parameter substitution: \(entry), \(Approov.string(from: approovResults.status))")
-
-                        do {
-                            if try mutator.handleInterceptorQueryParamSubstitutionResult(approovResults, queryKey: entry) {
-                                if let secureStringResult = approovResults.secureString {
-                                    if !secureStringResult.isEmpty {
-                                        hasChanges = true
-                                        queryKeys.append(entry)
-                                        updateURLString.replaceSubrange(Range(matchRange, in: updateURLString)!, with: secureStringResult)
-                                        updateURL = URL(string: updateURLString)
-                                        if updateURL == nil {
-                                            response.decision = .ShouldFail
-                                            // Do not put the URL in the message: it contains the secure string.
-                                            response.error = ApproovError.permanentError(
-                                                message: "Query parameter substitution for \(entry): the substituted URL is not valid")
-                                            return response
-                                        }
-                                    }
-                                }
-                            }
-                        } catch {
-                            applyMutatorError(error, response: &response, context: "Query parameter substitution for \(entry)")
-                            return response
-                        }
-                    }
+            let key = String(value.dropFirst(prefix.count))
+            let result = Approov.fetchSecureStringAndWait(key, nil)
+            recordLastARC(result)
+            log(.debug, "ApproovService: header substitution: \(header), \(statusName(result.status)), ARC: \(result.arc)")
+            let accepted = try ApproovRequestPathError.callHook("handleInterceptorHeaderSubstitutionResult") {
+                try mutator.handleInterceptorHeaderSubstitutionResult(result, header: header)
+            }
+            if result.status == .success {
+                guard accepted, let secret = result.secureString else {
+                    continue
                 }
+                if isHeaderCarriable(secret) {
+                    request.headers.replaceOrAdd(name: header, value: prefix + secret)
+                    substituted.append(header)
+                } else {
+                    log(.warning, "ApproovService: secure string header \(header) not substituted: the value cannot be carried in a header")
+                }
+            } else {
+                request.headers.replaceOrAdd(name: header, value: prefix + statusName(result.status))
             }
         }
+        if !substituted.isEmpty {
+            changes.setSubstitutionHeaderKeys(substituted)
+        }
+    }
 
-        // apply all the changes to the request
-        if (hasChanges) {
-            if let tokenHeaderKey = setTokenHeaderKey,
-               let tokenHeaderValue = setTokenHeaderValue {
-                response.request.headers.replaceOrAdd(name: tokenHeaderKey, value: tokenHeaderValue)
-                changes.setTokenHeaderKey(tokenHeaderKey)
+    /// An occurrence of a query parameter: its name and the range of its value, both as written in the URL.
+    struct QueryOccurrence {
+        let name: String
+        let value: Range<String.Index>
+    }
+
+    /// The query parameters of a URL string, in order, as written. Nothing is decoded.
+    static func queryOccurrences(in urlString: String) -> [QueryOccurrence] {
+        guard let queryStart = urlString.firstIndex(of: "?") else {
+            return []
+        }
+        let queryEnd = urlString[queryStart...].firstIndex(of: "#") ?? urlString.endIndex
+        var occurrences: [QueryOccurrence] = []
+        var fieldStart = urlString.index(after: queryStart)
+        while fieldStart <= queryEnd {
+            let fieldEnd = urlString[fieldStart..<queryEnd].firstIndex(of: "&") ?? queryEnd
+            if let equals = urlString[fieldStart..<fieldEnd].firstIndex(of: "=") {
+                let name = String(urlString[fieldStart..<equals])
+                occurrences.append(QueryOccurrence(name: name, value: urlString.index(after: equals)..<fieldEnd))
             }
-            if let traceIDHeaderKey = setTraceIDHeaderKey,
-               let traceIDHeaderValue = setTraceIDHeaderValue {
-                response.request.headers.replaceOrAdd(name: traceIDHeaderKey, value: traceIDHeaderValue)
-                changes.setTraceIDHeaderKey(traceIDHeaderKey)
+            if fieldEnd == queryEnd {
+                break
             }
-            if (!setSubstitutionHeaders.isEmpty) {
-                for (header, value) in setSubstitutionHeaders {
-                    response.request.headers.replaceOrAdd(name: header, value: value)
+            fieldStart = urlString.index(after: fieldEnd)
+        }
+        return occurrences
+    }
+
+    // The value of the occurrence at a position, as written, if the URL still has the same occurrences there.
+    private static func readBack(of name: String, at position: Int, count: Int, in urlString: String) -> String? {
+        let found = queryOccurrences(in: urlString)
+        guard found.count == count, found[position].name == name else {
+            return nil
+        }
+        return String(urlString[found[position].value])
+    }
+
+    private static func substituteQueryParams(_ request: inout ApproovRequest, mutator: ApproovServiceMutator,
+                                              changes: ApproovRequestMutations) throws {
+        let original = request.url.absoluteString
+        let keys = getSubstitutionQueryParams()
+        var urlString = original
+        var substituted: [String] = []
+        var index = 0
+        while true {
+            let occurrences = queryOccurrences(in: urlString)
+            guard index < occurrences.count else {
+                break
+            }
+            let occurrence = occurrences[index]
+            index += 1
+            guard keys.contains(occurrence.name) else {
+                continue
+            }
+            let written = String(urlString[occurrence.value])
+            guard !written.isEmpty else {
+                continue
+            }
+            let result = Approov.fetchSecureStringAndWait(written.removingPercentEncoding ?? written, nil)
+            recordLastARC(result)
+            log(.debug, "ApproovService: query parameter substitution: \(occurrence.name), \(statusName(result.status)), ARC: \(result.arc)")
+            let accepted = try ApproovRequestPathError.callHook("handleInterceptorQueryParamSubstitutionResult") {
+                try mutator.handleInterceptorQueryParamSubstitutionResult(result, queryKey: occurrence.name)
+            }
+            let replacement: String
+            if result.status == .success {
+                guard accepted, let secret = result.secureString else {
+                    continue
                 }
-                changes.setSubstitutionHeaderKeys(Array(setSubstitutionHeaders.keys))
+                replacement = secret
+            } else {
+                replacement = statusName(result.status)
             }
-            if let updateURLString = updateURL,
-               let originalURLString = request.url.absoluteString as String? {
-                if (originalURLString != updateURLString.absoluteString) {
-                    response.request.url = updateURLString
-                    changes.setSubstitutionQueryParamResults(originalURL: originalURLString, substitutionQueryParamKeys: queryKeys)
-                }
+            var candidate = urlString
+            candidate.replaceSubrange(occurrence.value, with: replacement)
+            guard let carried = URL(string: candidate)?.absoluteString,
+                  readBack(of: occurrence.name, at: index - 1, count: occurrences.count, in: carried)
+                    .map({ $0 == replacement || $0.removingPercentEncoding == replacement }) == true else {
+                log(.warning, "ApproovService: secure string query parameter \(occurrence.name) not substituted: the value cannot be carried in the URL")
+                continue
+            }
+            urlString = carried
+            if result.status == .success {
+                substituted.append(occurrence.name)
             }
         }
-
-        // call the processed request callback
-        do {
-            response.request = try mutator.handleInterceptorProcessedRequest(response.request, changes: changes)
-        } catch {
-            applyMutatorError(error, response: &response, context: "Interceptor processed request")
-            return response
+        if urlString != original, let url = URL(string: urlString) {
+            request.url = url
+            changes.setSubstitutionQueryParamResults(originalURL: original, substitutionQueryParamKeys: substituted)
         }
-
-        return response
     }
 
     /**

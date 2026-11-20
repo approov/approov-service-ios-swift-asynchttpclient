@@ -1188,11 +1188,12 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let request = try HTTPClient.Request(url: targetURLString, method: .GET)
         let protectedReply = fetchNetworkReply(for: request)
         
-        // Emitted headers should be empty rather than omitted
+        // The token header is present and empty. SPEC 1.3 (3.7.0): the trace header is sent only when the SDK
+        // supplied a trace ID, so an empty trace ID leaves it out (3.5.x sent it empty).
         let token = getHeader(from: protectedReply, key: "Approov-Token")
         let trace = getHeader(from: protectedReply, key: "Approov-TraceID")
         XCTAssertEqual(token, "")
-        XCTAssertEqual(trace, "")
+        XCTAssertNil(trace)
     }
 
     func testSubstitutionRemoval() throws {
@@ -1221,8 +1222,9 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         request.headers.add(name: "Api-Key", value: "placeholder-key")
         
         let reply = fetchNetworkReply(for: request)
-        // Original placeholder should remain intact if lookup is empty
-        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "placeholder-key")
+        // SPEC 1.4 (3.7.0): a key with no value is UNKNOWN_KEY, and the status is written into the placeholder
+        // (3.5.x kept the placeholder).
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "UNKNOWN_KEY")
     }
 
     func testUnprotectedExcludedPinningBehavior() throws {
@@ -1376,12 +1378,199 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             try? client.syncShutdown()
         }
 
+        // SPEC 1.7(a) (3.7.0): a required digest that cannot be created is a configuration error, the layer's
+        // network error, URLError on iOS (3.5.x threw ApproovError.permanentError).
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
-            guard case ApproovError.permanentError = error else {
-                XCTFail("Expected ApproovError.permanentError for a required digest that cannot be created, got \(error)")
-                return
+            XCTAssertEqual((error as? URLError)?.code, .unknown, "got \(error)")
+            XCTAssertTrue(error.localizedDescription.contains("required body digest"), "got \(error)")
+        }
+    }
+
+    // MARK: - 3.7.0 Request Decisions
+
+    private func decide(_ url: String, tokenStatus: String? = nil, secureStringStatus: String? = nil,
+                        mutator: ApproovServiceMutator? = nil, useStatus: Bool = false,
+                        headers: HTTPHeaders = HTTPHeaders()) throws -> ApproovUpdateResponse {
+        ApproovService.setServiceMutator(mutator)
+        ApproovService.setUseApproovStatusIfNoToken(shouldUse: useStatus)
+        if let tokenStatus {
+            setDirective(#"{ "operation": "fetchApproovToken", "response": { "status": "\#(tokenStatus)" } }"#)
+        }
+        if let secureStringStatus {
+            setDirective(#"{ "operation": "fetchSecureString", "response": { "status": "\#(secureStringStatus)" } }"#)
+        }
+        return ApproovService.updateRequestWithApproov(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: url)), method: "GET", headers: headers))
+    }
+
+    // T37-01, T37-01a, T37-03, T37-05, T37-06, T37-27: token decisions for a listed host.
+    func testTokenDecisionTablesForAListedHost() throws {
+        try reinitializeServiceWithTargetHost()
+        let network = ["NO_NETWORK", "POOR_NETWORK", "MITM_DETECTED"]
+        let fatal = ["BAD_URL", "NOT_INITIALIZED", "REJECTED", "DISABLED", "UNKNOWN_KEY", "BAD_KEY", "BAD_PAYLOAD", "INTERNAL_ERROR"]
+        let mutators: [(String, ApproovServiceMutator)] = [("CLOSE_FAILURE", ApproovCloseFailureMutator.CLOSE_FAILURE),
+                                                           ("ALWAYS_PROCEED", ApproovAlwaysProceedMutator.ALWAYS_PROCEED)]
+        for (name, mutator) in mutators {
+            for useStatus in [false, true] {
+                for status in ["NO_APPROOV_SERVICE"] + network + fatal {
+                    let row = "\(name) useStatus=\(useStatus) \(status)"
+                    let response = try decide(targetURLString, tokenStatus: status, mutator: mutator, useStatus: useStatus)
+                    let aborts = name == "CLOSE_FAILURE" && (fatal.contains(status) || (network.contains(status) && !useStatus))
+                    if aborts {
+                        XCTAssertNotEqual(response.decision, .ShouldProceed, row)
+                        if network.contains(status) {
+                            guard case ApproovError.networkingError? = response.error else { XCTFail("\(row): \(String(describing: response.error))"); continue }
+                            XCTAssertEqual(response.decision, .ShouldRetry, row)
+                        } else {
+                            guard case ApproovError.permanentError(let message)? = response.error else { XCTFail("\(row): \(String(describing: response.error))"); continue }
+                            XCTAssertEqual(message, "Approov token fetch for \(targetURLString): \(status)", row)
+                        }
+                    } else {
+                        XCTAssertEqual(response.decision, .ShouldProceed, row)
+                        XCTAssertNil(response.error, row)
+                        XCTAssertEqual(response.request.headers.first(name: "Approov-Token"), useStatus ? status : "", row)
+                    }
+                }
+                for status in ["UNKNOWN_URL", "UNPROTECTED_URL"] {
+                    let response = try decide(targetURLString, tokenStatus: status, mutator: mutator, useStatus: useStatus)
+                    XCTAssertEqual(response.decision, .ShouldProceed, status)
+                    XCTAssertNil(response.request.headers.first(name: "Approov-Token"), "\(name) \(status): no token header")
+                }
+                let success = try decide(targetURLString, mutator: mutator, useStatus: useStatus)
+                XCTAssertFalse(try XCTUnwrap(success.request.headers.first(name: "Approov-Token")).isEmpty, "\(name) SUCCESS")
             }
         }
+    }
+
+    // T37-28: a failure for a host that is not listed, or with no pins map, goes out untouched.
+    func testFailureForAHostThatIsNotListedGoesOutUntouched() throws {
+        try reinitializeServiceWithTargetHost()
+        for mutator in [ApproovCloseFailureMutator.CLOSE_FAILURE as ApproovServiceMutator,
+                        ApproovAlwaysProceedMutator.ALWAYS_PROCEED] {
+            for status in ["NO_NETWORK", "REJECTED", "NO_APPROOV_SERVICE"] {
+                let response = try decide(unprotectedURLString, tokenStatus: status, mutator: mutator, useStatus: true)
+                XCTAssertEqual(response.decision, .ShouldProceed, "\(mutator) \(status)")
+                XCTAssertNil(response.error)
+                XCTAssertNil(response.request.headers.first(name: "Approov-Token"), "\(mutator) \(status): untouched")
+            }
+        }
+        MiniSDKAttesterProxyController.setPinsUnavailable(true)
+        defer { MiniSDKAttesterProxyController.setPinsUnavailable(false) }
+        let response = try decide(targetURLString, tokenStatus: "REJECTED", mutator: ApproovCloseFailureMutator.CLOSE_FAILURE)
+        XCTAssertEqual(response.decision, .ShouldProceed, "with no pins map no host is listed (SPEC 2.4)")
+        XCTAssertNil(response.request.headers.first(name: "Approov-Token"))
+    }
+
+    private struct ThrowingFetchMutator: ApproovServiceMutator {
+        let error: Error
+        func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool { throw error }
+    }
+
+    private struct InheritingMutator: ApproovServiceMutator {}
+
+    // T37-02, T37-17: an app abort is a URLError, a standard decision keeps its ApproovError.
+    func testHookErrorsOnTheRequestPath() throws {
+        try reinitializeServiceWithTargetHost()
+        let abort = try decide(unprotectedURLString, tokenStatus: "NO_NETWORK",
+                               mutator: ThrowingFetchMutator(error: URLError(.notConnectedToInternet)))
+        XCTAssertEqual((abort.error as? URLError)?.code, .notConnectedToInternet, "a custom throw aborts even an unlisted host")
+
+        struct AppError: Error {}
+        let wrapped = try decide(targetURLString, mutator: ThrowingFetchMutator(error: AppError()))
+        XCTAssertEqual((wrapped.error as? URLError)?.code, .unknown)
+        XCTAssertTrue((wrapped.error as NSError?)?.userInfo[NSUnderlyingErrorKey] is AppError)
+
+        let inherited = try decide(targetURLString, tokenStatus: "REJECTED", mutator: InheritingMutator())
+        guard case ApproovError.permanentError? = inherited.error else {
+            return XCTFail("an inherited standard decision keeps its ApproovError, got \(String(describing: inherited.error))")
+        }
+    }
+
+    func testTokenPrefixThatAHeaderCannotCarryIsAConfigurationError() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setTokenHeader(header: "Authorization", prefix: "Bearer\n")
+        let response = try decide(targetURLString)
+        XCTAssertEqual((response.error as? URLError)?.code, .unknown)
+        XCTAssertFalse((response.error?.localizedDescription ?? "").contains("Bearer\n"))
+    }
+
+    private func secureStringScenario() throws {
+        let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "noApproovTokenDomains": ["\(unprotected)"],
+            "initialSecureStrings": { "header-key": "header-secret", "query-key": "query-secret", "amp-key": "a&b" }
+            """)
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: "Bearer ")
+        ApproovService.addSubstitutionQueryParam(key: "k")
+    }
+
+    // T37-07, T37-30: on a protected channel a status other than SUCCESS is written into the placeholder.
+    func testSecureStringStatusIsWrittenIntoThePlaceholder() throws {
+        try secureStringScenario()
+        let success = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+        XCTAssertEqual(success.request.headers.first(name: "Api-Key"), "Bearer header-secret")
+        let unknown = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer no-such-key")]))
+        XCTAssertEqual(unknown.request.headers.first(name: "Api-Key"), "Bearer UNKNOWN_KEY")
+        XCTAssertNil(unknown.error)
+        for status in ["REJECTED", "NO_NETWORK", "INTERNAL_ERROR"] {
+            let response = try decide(targetURLString, secureStringStatus: status,
+                                      headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+            XCTAssertEqual(response.decision, .ShouldProceed, status)
+            XCTAssertEqual(response.request.headers.first(name: "Api-Key"), "Bearer \(status)", status)
+            XCTAssertFalse(try XCTUnwrap(response.request.headers.first(name: "Approov-Token")).isEmpty, "token present")
+        }
+    }
+
+    // T37-25: no secure string on a failure status, on http or on UNKNOWN_URL; no fetch at all.
+    func testNoSecureStringWithoutAProtectedChannel() throws {
+        try secureStringScenario()
+        let headers = HTTPHeaders([("Api-Key", "Bearer header-key")])
+        MiniSDKAttesterProxyController.clearCallLog()
+        let failure = try decide(targetURLString, tokenStatus: "NO_NETWORK",
+                                 mutator: ApproovAlwaysProceedMutator.ALWAYS_PROCEED, headers: headers)
+        XCTAssertEqual(failure.request.headers.first(name: "Api-Key"), "Bearer header-key")
+        let http = try decide(targetURLString.replacingOccurrences(of: "https://", with: "http://"), headers: headers)
+        XCTAssertEqual(http.request.headers.first(name: "Api-Key"), "Bearer header-key")
+        let unknownURL = try decide(targetURLString, tokenStatus: "UNKNOWN_URL", headers: headers)
+        XCTAssertEqual(unknownURL.request.headers.first(name: "Api-Key"), "Bearer header-key")
+        XCTAssertFalse(MiniSDKAttesterProxyController.callLog().contains { $0.hasPrefix("fetchSecureString") },
+                       "no secure string is fetched there")
+    }
+
+    // T37-24: a secrets-only API gets its secure strings and no token or trace header.
+    func testSecretsOnlyAPIGetsSecureStringsAndNoToken() throws {
+        try secureStringScenario()
+        let response = try decide(unprotectedURLString + "/p?k=query-key",
+                                  headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+        XCTAssertEqual(response.request.headers.first(name: "Api-Key"), "Bearer header-secret")
+        XCTAssertEqual(URLComponents(url: response.request.url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first { $0.name == "k" }?.value, "query-secret")
+        XCTAssertNil(response.request.headers.first(name: "Approov-Token"))
+        XCTAssertNil(response.request.headers.first(name: "Approov-TraceID"))
+    }
+
+    // SPEC 1.4: every query occurrence on its own; a value the URL cannot carry keeps the placeholder.
+    func testQuerySubstitutionEveryOccurrenceAndCarriability() throws {
+        try secureStringScenario()
+        let response = try decide(targetURLString + "/p?k=query-key&x=1&k=amp-key&k=no-such-key")
+        let query = try XCTUnwrap(response.request.url.query)
+        XCTAssertEqual(query, "k=query-secret&x=1&k=amp-key&k=UNKNOWN_KEY",
+                       "a value with & cannot be carried, so its placeholder stays")
+    }
+
+    // T37-29: non-delivery and failure lines are DEBUG only and carry no secret.
+    func testNonDeliveryLinesAreDebugOnly() throws {
+        try secureStringScenario()
+        let infoLines = try captureLogs(level: .info) {
+            _ = try decide(targetURLString, secureStringStatus: "REJECTED", headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+            _ = try decide(targetURLString, tokenStatus: "NO_NETWORK", mutator: ApproovAlwaysProceedMutator.ALWAYS_PROCEED)
+        }
+        XCTAssertFalse(infoLines.contains { $0.1.contains("substitution") || $0.1.contains("proceeds") }, "\(infoLines)")
+        let debugLines = try captureLogs(level: .debug) {
+            _ = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+        }
+        XCTAssertTrue(debugLines.contains { $0.0 == .debug && $0.1.contains("header substitution: Api-Key") }, "control")
+        XCTAssertFalse(debugLines.contains { $0.1.contains("header-secret") }, "no line carries a secret")
     }
 
     // MARK: - §5.10 Logging
