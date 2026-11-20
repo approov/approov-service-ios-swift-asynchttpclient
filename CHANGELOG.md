@@ -29,6 +29,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - `getLastARC()` returns the ARC of the last fetch the layer made and makes no fetch of its own.
 - **Breaking:** `getMessageSignature(message:)` returns `String?` and no longer throws. It returns the account signature, as `getAccountMessageSignature` does.
 - The token and the secure string log lines are written at DEBUG only, and log lines no longer carry a URL query, a fragment or a pin.
+- **Breaking:** a connection that Approov pinning rejects fails with `URLError(.serverCertificateUntrusted)`, with the AsyncHTTPClient error as the underlying error. It still fails at the connect deadline (`HTTPClient.Configuration.timeout.connect`), because AsyncHTTPClient retries the connection until then.
+- **Breaking:** while Approov protection is on, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when pinning cannot run: an event loop group that is not a NIOTS group, a `delegateAndChannel` event loop that is not a NIOTS loop, or a client or request TLS configuration without `.fullVerification`.
+- A host with no pins and no Managed Trust Roots now connects on OS trust, with one warning for each host while the pins do not change. Pin lookup ignores case and a trailing dot. A connection without SNI (to an IP address) no longer fails, unless an IP address has Approov pins.
 - Refactored `ApproovService` to handle multi-threaded state access safely with locks.
 - Changed Package.swift to swift-tools-version 5.8 with support for structured headers, exact SDK dependencies, and conditional local Mini-SDK path setup.
 - `Package.swift` `releaseTAG` is now a `dev` placeholder, stamped with the release version by the `tag-release` CI job at tag time (was a hardcoded literal), keeping it in lock-step with the runtime user-property string.
@@ -44,7 +47,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Fixed
 - Pinning now matches pins only against the certificate path that trust evaluation built. A decoy certificate that the server appends no longer satisfies a pin, and a managed trust root pin (`*`) now matches when the server does not send its root. The URLSession layer pins the same path.
-- A request whose own `tlsConfiguration` does not use `.fullVerification` now fails with `ApproovError.configurationError` when Approov is enabled. Before, it completed the TLS handshake without the Approov pin check.
+- A request whose own `tlsConfiguration` does not use `.fullVerification` now fails with `URLError(.unknown)` when Approov is enabled. Before, it completed the TLS handshake without the Approov pin check.
+- `ApproovHTTPClient.EventLoopPreference(_:)` now keeps the event loop of a `.delegate(on:)` or `.delegateAndChannel(on:)` preference. Before, it changed every such preference to `.indifferent`, so the delegate ran on an event loop that the caller did not ask for.
 - The async `execute` functions now run the Approov update on a global Dispatch queue. Before, the blocking token fetch ran on the Swift concurrency pool and could stop all async work in the app on a slow network.
 - The body digest for the async API now reads the body from `readerIndex`. Before, a buffer with a moved `readerIndex` gave no `Content-Digest`, or a failure when the digest was required.
 - A stream body that writes from another thread, or after the digest extraction returned, no longer uses the `EmbeddedEventLoop` off its thread, which NIO reports as API misuse. Such a body is not digested. A body closure must be repeatable, because AsyncHTTPClient also calls it again on a 307 or 308 redirect.
