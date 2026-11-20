@@ -14,6 +14,7 @@
 // ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
 // THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import Approov
 import CommonCrypto
 import Foundation
 import RawStructuredFieldValues
@@ -102,6 +103,11 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         return try factory(for: provider)?.buildSignatureParameters(provider: provider, changes: changes)
     }
 
+    /** The CLOSE_FAILURE token decision, open for a subclass to change (SPEC 3.1). */
+    public func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        return try ApproovCloseFailureMutator.CLOSE_FAILURE.handleInterceptorFetchTokenResult(approovResults, url: url)
+    }
+
     public func handleInterceptorProcessedRequest(_ request: ApproovRequest,
                                                    changes: ApproovRequestMutations) throws -> ApproovRequest {
         return try signedRequest(request, changes: changes)
@@ -127,7 +133,8 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
      * cannot be generated fail the request (SPEC 1.7(a)).
      */
     func signedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
-        guard request.headers.first(name: ApproovService.getTokenHeader()) != nil else {
+        // Sign only a request that carries the token header the layer added (SPEC 3.1, 3.4)
+        guard changes.getTokenHeaderKey() != nil else {
             return request
         }
         let provider = ApproovAsyncHTTPClientComponentProvider(request: request)

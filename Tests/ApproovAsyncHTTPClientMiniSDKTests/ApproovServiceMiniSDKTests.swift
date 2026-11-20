@@ -818,6 +818,27 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §5 Message Signing
 
+    // T37-08: a failure that proceeds to a listed host is signed over the token header as sent.
+    func testFailureThatProceedsIsSigned() throws {
+        try reinitializeServiceWithTargetHost()
+        final class AlwaysProceedSigner: ApproovDefaultMessageSigning {
+            override func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool { true }
+        }
+        let signer = AlwaysProceedSigner().setDefaultFactory(ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory())
+        let response = try decide(targetURLString, tokenStatus: "NO_NETWORK", mutator: signer)
+        XCTAssertEqual(response.request.headers.first(name: "Approov-Token"), "")
+        XCTAssertTrue(try XCTUnwrap(response.request.headers.first(name: "Signature-Input")).contains("\"approov-token\""))
+    }
+
+    // SPEC 3.1: a token header the app set itself is not the layer's, so it is not signed.
+    func testAppSetTokenHeaderIsNotSigned() throws {
+        let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        try reinitializeServiceWithTargetHost(scenarioBody: "\"noApproovTokenDomains\": [\"\(unprotected)\"]")
+        let response = try decide(unprotectedURLString, mutator: signer(),
+                                  headers: HTTPHeaders([("Approov-Token", "set-by-the-app")]))
+        XCTAssertNil(response.request.headers.first(name: "Signature"), "a secrets-only request is never signed")
+    }
+
     private func signer(_ configure: (SignatureParametersFactory) -> Void = { _ in }) -> ApproovDefaultMessageSigning {
         let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
         configure(factory)
