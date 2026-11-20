@@ -7,6 +7,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [3.7.0] - Unreleased
 
 ### Added
+- `SignatureParametersFactory.setUseInstallAndAccountMessageSigning()` signs with the install and the account key, as two members of one `Signature` dictionary. The default factory signs with the install key only.
+- `ApproovService.getServerAdjustedCurrentTimeMS()` gives the time adjusted to the Approov servers' clock.
 - `ApproovCloseFailureMutator.CLOSE_FAILURE` (the default), `ApproovAlwaysProceedMutator.ALWAYS_PROCEED` and `DEFAULT`, the named service mutators.
 - `setLoggingLevel(_:)` sets the logging level. `OFF` silences the layer.
 - `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()`, `setTraceIDHeader(header:)` and `getTraceIDHeader()`, the header names that every 3.7.x layer uses.
@@ -16,6 +18,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Excluded vendored message signing license files from the target build source to prevent SwiftPM warnings.
 
 ### Changed
+- Message signature `created` and `expires` follow the Approov servers' clock, so a device with a wrong clock still signs inside the backend's window.
+- A request that proceeds after a token fetch failure is signed over its token header (empty, or the status). Only the token header that the layer added is signed: a token header the app set itself is not.
+- With both signatures selected, a signature that cannot be produced is left out and the other is sent.
+- `@authority` is the lowercase host with a non-default port. A host factory matches the host without regard to case or a trailing dot.
 - **Breaking:** a token fetch failure for a host that is not an Approov API domain no longer fails the request: it goes out untouched. A failure that proceeds to an API domain carries the token header with an empty token, or the status with `setUseApproovStatusIfNoToken`, and the trace header when the SDK supplied one.
 - **Breaking:** a secure string fetch never fails the request. A status other than `SUCCESS` is written into the placeholder, keeping a required prefix. Secure strings are substituted only on https to an API domain, including a secrets-only API (`UNPROTECTED_URL`). Every occurrence of a substitution query parameter is substituted.
 - **Breaking:** an error that a service mutator hook throws is a `URLError`: a `URLError` passes unchanged, and any other error becomes `URLError(.unknown)` with the original as the underlying error. The `CLOSE_FAILURE` decisions keep `ApproovError`. A required body digest that cannot be generated and an unsupported signature algorithm fail with `URLError(.unknown)`.
@@ -29,6 +35,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
 
 ### Deprecated
+- `ApproovDefaultMessageSigning.processedRequest`. Use `handleInterceptorProcessedRequest`.
 - `ApproovServiceMutatorDefault`. Use `ApproovCloseFailureMutator.DEFAULT` or `.CLOSE_FAILURE`.
 - `loggingLevel`, `approovTokenHeaderAndPrefix`, `getApproovTokenHeader()`, `setApproovTraceIDHeader(header:)`, `getApproovTraceIDHeader()` and `getMessageSignature(message:)`.
 
