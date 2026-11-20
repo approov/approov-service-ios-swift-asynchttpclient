@@ -93,7 +93,7 @@ public class ApproovService {
     /** Status of Approov SDK initialization */
     private static var approovSDKInitialised = false
 
-    /** Configuration string used for initialization */
+    /** The Approov account ID used for initialization */
     private static var _approovConfigString: String?
 
     /** Lock to manage variable access */
@@ -202,8 +202,13 @@ public class ApproovService {
     }
 
     /**
-     * Initializes the ApproovService with the config obtained using `approov sdk -getConfigString`
-     * or in the original onboarding email.
+     * Initializes the ApproovService with the Approov account ID. Get it from your onboarding email, or with
+     * `approov sdk -getConfigString` (the CLI calls it the SDK config string). It is not a secret, and it is the same
+     * for every app in the account. An empty string starts bypass mode, in which requests go out without Approov.
+     *
+     * @param config is the Approov account ID, or "" for bypass mode
+     * @param comment is an optional comment for the SDK
+     * @throws ApproovError.initializationFailure if the value is not a complete, unaltered account ID
      */
     public static func initialize(config: String, comment: String? = nil) throws {
         try initLock.withLock {
@@ -421,6 +426,7 @@ public class ApproovService {
         stateLock.withLock { _serviceMutator }
     }
 
+    /** The Approov account ID that the package was initialized with, or nil before initialization */
     public static var approovConfigString: String? {
         initLock.withLock { _approovConfigString }
     }
@@ -457,7 +463,15 @@ public class ApproovService {
         }
     }
 
-    @available(*, deprecated, message: "A plain HTTPClient follows a redirect with this request's Approov protection, which can then reach another host. Use ApproovHTTPClient, which protects each redirect hop as a new request.")
+    /**
+     * Returns a protected copy of a request, for a transport that owns its own `HTTPClient` and cannot use
+     * `ApproovHTTPClient`. Create that client with `redirectConfiguration: .disallow`: a plain `HTTPClient` follows a
+     * redirect with this protection, also to another host. `ApproovHTTPClient` protects each redirect hop instead.
+     *
+     * @param request is the request to protect
+     * @return the protected request, or the request unchanged if Approov does not apply to it
+     * @throws ApproovError for a decision of the standard mutators, or a URLError for a hook or configuration error
+     */
     public static func signRequest(_ request: HTTPClient.Request) throws -> HTTPClient.Request {
         let bodyData = extractBodyData(from: request.body)
         let approovReq = ApproovRequest(
