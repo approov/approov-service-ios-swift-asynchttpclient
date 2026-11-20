@@ -13,7 +13,7 @@ let sdkVersion: Version = "3.5.3"
 // NOTE: The useMiniSDK flag and miniSDKPath are used for local and CI automated testing only.
 // They are not included or used in production releases, which depend exclusively on the real approov-ios-sdk.
 let useMiniSDK = ProcessInfo.processInfo.environment["APPROOV_USE_MINI_SDK"] == "1"
-let miniSDKPath = ProcessInfo.processInfo.environment["APPROOV_MINI_SDK_PATH"] ?? ""
+let miniSDKPath = ProcessInfo.processInfo.environment["APPROOV_MINI_SDK_PATH"] ?? "../core-service-layers-testing/mini-sdk-3.7.0/ios"
 
 let approovPackageName = useMiniSDK ? "mini-sdk-ios" : "approov-ios-sdk"
 let packagePlatforms: [SupportedPlatform] = useMiniSDK
