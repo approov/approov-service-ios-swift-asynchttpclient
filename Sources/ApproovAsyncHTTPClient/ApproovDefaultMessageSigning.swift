@@ -92,131 +92,105 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         return self
     }
 
-    /**
-     * Builds the signature parameters for a given request.
-     *
-     * - Parameters:
-     *   - provider: The component provider for the request.
-     *   - changes: The request mutations to apply.
-     * - Returns: The generated `SignatureParameters`, or `nil` if no factory is available.
-     */
-    private func buildSignatureParameters(provider: ApproovAsyncHTTPClientComponentProvider, changes: ApproovRequestMutations) throws -> SignatureParameters? {
-        let factory = hostFactories[provider.getAuthority()] ?? defaultFactory
-        return try factory?.buildSignatureParameters(provider: provider, changes: changes)
+    /** The factory for the request's host, compared as pins are looked up, or the default factory. */
+    private func factory(for provider: ApproovAsyncHTTPClientComponentProvider) -> SignatureParametersFactory? {
+        let host = ApproovService.normalisedHost(provider.getRequest().url.host ?? "")
+        return hostFactories.first { ApproovService.normalisedHost($0.key) == host }?.value ?? defaultFactory
     }
 
-    /**
-     * Processes a request to add message signature headers.
-     *
-     * - Parameters:
-     *   - request: The original HTTP request.
-     *   - changes: The request mutations that were applied by the Approov interceptor.
-     * - Returns: The processed HTTP request with the signature headers added.
-     * - Throws: An `ApproovError` if an error occurs during processing.
-     */
+    private func buildSignatureParameters(provider: ApproovAsyncHTTPClientComponentProvider, changes: ApproovRequestMutations) throws -> SignatureParameters? {
+        return try factory(for: provider)?.buildSignatureParameters(provider: provider, changes: changes)
+    }
+
     public func handleInterceptorProcessedRequest(_ request: ApproovRequest,
                                                    changes: ApproovRequestMutations) throws -> ApproovRequest {
-        return try processedRequest(request, changes: changes)
+        return try signedRequest(request, changes: changes)
+    }
+
+    @available(*, deprecated, message: "Use handleInterceptorProcessedRequest instead.")
+    public func processedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        return try signedRequest(request, changes: changes)
+    }
+
+    private static func withoutSignatureHeaders(_ request: ApproovRequest) -> ApproovRequest {
+        var unsigned = request
+        for field in ["Signature", "Signature-Input", "Signature-Base-Digest", "Content-Digest"] {
+            unsigned.headers.remove(name: field)
+        }
+        return unsigned
     }
 
     /**
-     * Helper to process the request signature changes.
+     * Signs a request that carries the token header. Each selected signature is a member of one Signature and one
+     * Signature-Input dictionary. A member that cannot be produced is left out; with no member, the request is
+     * sent unsigned and an error is logged (SPEC 3.5). An unsupported algorithm and a required body digest that
+     * cannot be generated fail the request (SPEC 1.7(a)).
      */
-    public func processedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
-        // If the request doesn't have an Approov token, we don't need to sign it
-        if request.headers.first(name: ApproovService.getTokenHeader()) != nil {
-            // Generate and add a message signature
-            let provider = ApproovAsyncHTTPClientComponentProvider(request: request)
-            guard let params = try buildSignatureParameters(provider: provider, changes: changes) else {
-                // No signature to be added; proceed with the original request
-                return request
-            }
-
-            // Build the signature base. A failure here is fail-open (proceed unsigned + log at error).
-            let baseBuilder = SignatureBaseBuilder(sigParams: params, ctx: provider)
-            let message: String
-            do {
-                message = try baseBuilder.createSignatureBase()
-            } catch {
-                ApproovService.log(.error, "ApproovService: failed to build the signature base, skipping signing: \(error.localizedDescription)")
-                return provider.getRequest()
-            }
-            // WARNING never log the message as it contains an Approov token which provides access to your API.
-
-            // Generate the signature
-            let sigId: String
-            let signature: Data
-            switch params.getAlg() {
-            case ApproovDefaultMessageSigning.ALG_ES256:
-                sigId = "install"
-                // Message signing is fail-open: if the SDK cannot provide a usable install signature
-                // (no signature available, or a value that cannot be base64-decoded) we proceed
-                // unsigned and log at error level, rather than aborting the request.
-                guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
-                      let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    ApproovService.log(.error, "ApproovService: install message signature unavailable, skipping signing")
-                    return provider.getRequest()
-                }
-                // Decode the signature from ASN.1 DER format. A malformed signature is also treated as
-                // fail-open (proceed unsigned + log) rather than aborting the request.
-                do {
-                    signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
-                } catch {
-                    ApproovService.log(.error, "ApproovService: failed to decode ASN.1 DER install signature, skipping signing: \(error.localizedDescription)")
-                    return provider.getRequest()
-                }
-            case ApproovDefaultMessageSigning.ALG_HS256:
-                sigId = "account"
-                // Fail-open: if the SDK cannot provide a usable account signature (none available, e.g.
-                // no mksid yet, or a value that cannot be base64-decoded) we proceed unsigned and log.
-                guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
-                      let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    ApproovService.log(.error, "ApproovService: account message signature unavailable, skipping signing")
-                    return provider.getRequest()
-                }
-                signature = decodedSignature
-            default:
-                // Unsupported algorithm is a configuration error and is the one signing failure (with a
-                // required body digest) that fails closed.
-                throw ApproovRequestPathError.configuration("Unsupported algorithm identifier: \(params.getAlg() ?? "unknown")")
-            }
-
-            // Create signature headers. Serialization failure (a thrown error or a nil result) is
-            // fail-open: proceed unsigned and log at error level rather than aborting the request.
-            let sigHeader: String
-            let sigInputHeader: String
-            do {
-                guard let sh = try SFV.serializeDictionary(key: sigId, data: signature),
-                      let sih = try SFV.serializeDictionary(key: sigId, innerList: params.toComponentValue()) else {
-                    ApproovService.log(.error, "ApproovService: failed to serialize signature headers, skipping signing")
-                    return provider.getRequest()
-                }
-                sigHeader = sh
-                sigInputHeader = sih
-            } catch {
-                ApproovService.log(.error, "ApproovService: failed to serialize signature headers, skipping signing: \(error.localizedDescription)")
-                return provider.getRequest()
-            }
-
-            // Add headers to the request. Use replaceOrAdd so that re-processing an already-signed
-            // request does not emit duplicate Signature / Signature-Input header lines.
-            var signedRequest = provider.getRequest()
-            signedRequest.headers.replaceOrAdd(name: "Signature", value: sigHeader)
-            signedRequest.headers.replaceOrAdd(name: "Signature-Input", value: sigInputHeader)
-
-            if params.isDebugMode() {
-                let digest = ApproovDefaultMessageSigning.sha256(data: Data(message.utf8))
-                if let sigBaseDigestHeader = (try? SFV.serializeDictionary(key: "sha-256", data: digest)) ?? nil {
-                    signedRequest.headers.replaceOrAdd(name: "Signature-Base-Digest", value: sigBaseDigestHeader)
-                } else {
-                    ApproovService.log(.debug, "ApproovService: Failed to get digest algorithm - no debug entry")
-                }
-            }
-
-            return signedRequest
+    func signedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        guard request.headers.first(name: ApproovService.getTokenHeader()) != nil else {
+            return request
         }
-
-        return request
+        let provider = ApproovAsyncHTTPClientComponentProvider(request: request)
+        guard let params = try buildSignatureParameters(provider: provider, changes: changes) else {
+            return request
+        }
+        let algorithms = params.getAlg().map { [$0] } ?? (factory(for: provider)?.signatureAlgorithms() ?? [])
+        for alg in algorithms where alg != ApproovDefaultMessageSigning.ALG_ES256 && alg != ApproovDefaultMessageSigning.ALG_HS256 {
+            throw ApproovRequestPathError.configuration("Unsupported algorithm identifier: \(alg)")
+        }
+        var signatures: [(String, Data)] = []
+        var inputs: [(String, InnerList)] = []
+        var firstMessage: String?
+        for alg in algorithms {
+            let memberParams = SignatureParameters(base: params).setAlg(alg)
+            let sigId = (alg == ApproovDefaultMessageSigning.ALG_ES256) ? "install" : "account"
+            do {
+                // WARNING never log the message: it contains an Approov token which gives access to your API.
+                let message = try SignatureBaseBuilder(sigParams: memberParams, ctx: provider).createSignatureBase()
+                let signature: Data
+                if alg == ApproovDefaultMessageSigning.ALG_ES256 {
+                    guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
+                          let decodedSignature = Data(base64Encoded: base64Signature) else {
+                        ApproovService.log(.error, "ApproovService: install message signature unavailable, leaving it out")
+                        continue
+                    }
+                    signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
+                } else {
+                    guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
+                          let decodedSignature = Data(base64Encoded: base64Signature) else {
+                        ApproovService.log(.error, "ApproovService: account message signature unavailable, leaving it out")
+                        continue
+                    }
+                    signature = decodedSignature
+                }
+                inputs.append((sigId, try memberParams.toComponentValue()))
+                signatures.append((sigId, signature))
+                firstMessage = firstMessage ?? message
+            } catch {
+                ApproovService.log(.error, "ApproovService: \(sigId) message signature failed, leaving it out: \(error.localizedDescription)")
+            }
+        }
+        guard !signatures.isEmpty else {
+            ApproovService.log(.error, "ApproovService: no message signature could be produced, proceeding unsigned")
+            return ApproovDefaultMessageSigning.withoutSignatureHeaders(provider.getRequest())
+        }
+        guard let sigHeader = (try? SFV.serializeDictionary(entries: signatures)) ?? nil,
+              let sigInputHeader = (try? SFV.serializeDictionary(entries: inputs)) ?? nil else {
+            ApproovService.log(.error, "ApproovService: failed to serialize signature headers, skipping signing")
+            return ApproovDefaultMessageSigning.withoutSignatureHeaders(provider.getRequest())
+        }
+        var signedRequest = provider.getRequest()
+        signedRequest.headers.replaceOrAdd(name: "Signature", value: sigHeader)
+        signedRequest.headers.replaceOrAdd(name: "Signature-Input", value: sigInputHeader)
+        if params.isDebugMode(), let message = firstMessage {
+            let digest = ApproovDefaultMessageSigning.sha256(data: Data(message.utf8))
+            if let sigBaseDigestHeader = (try? SFV.serializeDictionary(key: "sha-256", data: digest)) ?? nil {
+                signedRequest.headers.replaceOrAdd(name: "Signature-Base-Digest", value: sigBaseDigestHeader)
+            } else {
+                ApproovService.log(.debug, "ApproovService: Failed to get digest algorithm - no debug entry")
+            }
+        }
+        return signedRequest
     }
 
     /**
@@ -366,6 +340,7 @@ public class SignatureParametersFactory {
     private var baseParameters: SignatureParameters?
     private var bodyDigestAlgorithm: String?
     private var bodyDigestRequired: Bool = false
+    private var useInstallMessageSigning: Bool = true
     private var useAccountMessageSigning: Bool = false
     private var addCreated: Bool = false
     private var expiresLifetime: Int64 = 0
@@ -396,16 +371,40 @@ public class SignatureParametersFactory {
         return self
     }
 
+    /** Selects the install signature only (SPEC 3.2). */
     @discardableResult
     public func setUseInstallMessageSigning() -> SignatureParametersFactory {
+        self.useInstallMessageSigning = true
         self.useAccountMessageSigning = false
         return self
     }
 
+    /** Selects the account signature only (SPEC 3.2). */
     @discardableResult
     public func setUseAccountMessageSigning() -> SignatureParametersFactory {
+        self.useInstallMessageSigning = false
         self.useAccountMessageSigning = true
         return self
+    }
+
+    /** Selects both signatures, as two members of one Signature dictionary (SPEC 3.2). */
+    @discardableResult
+    public func setUseInstallAndAccountMessageSigning() -> SignatureParametersFactory {
+        self.useInstallMessageSigning = true
+        self.useAccountMessageSigning = true
+        return self
+    }
+
+    /** The algorithms of the signatures to produce, install first. */
+    func signatureAlgorithms() -> [String] {
+        var algorithms: [String] = []
+        if useInstallMessageSigning {
+            algorithms.append(ApproovDefaultMessageSigning.ALG_ES256)
+        }
+        if useAccountMessageSigning {
+            algorithms.append(ApproovDefaultMessageSigning.ALG_HS256)
+        }
+        return algorithms
     }
 
     @discardableResult
@@ -445,7 +444,6 @@ public class SignatureParametersFactory {
         } else {
             requestParameters = SignatureParameters(base: baseParameters!)
         }
-        requestParameters.setAlg(useAccountMessageSigning ? ApproovDefaultMessageSigning.ALG_HS256 : ApproovDefaultMessageSigning.ALG_ES256)
 
         if addCreated || expiresLifetime > 0 {
             let currentTime = ApproovService.serverAdjustedTimeMS() / 1000

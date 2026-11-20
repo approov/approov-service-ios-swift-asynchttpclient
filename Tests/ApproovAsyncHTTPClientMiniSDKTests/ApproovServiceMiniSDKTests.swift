@@ -818,6 +818,46 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §5 Message Signing
 
+    private func signer(_ configure: (SignatureParametersFactory) -> Void = { _ in }) -> ApproovDefaultMessageSigning {
+        let factory = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+        configure(factory)
+        return ApproovDefaultMessageSigning().setDefaultFactory(factory)
+    }
+
+    // T37-04, SPEC 3.6: the three out-of-the-box signing states.
+    func testSigningStates() throws {
+        try reinitializeServiceWithTargetHost()
+        XCTAssertNil(try decide(targetURLString).request.headers.first(name: "Signature"), "off out of the box")
+
+        let install = try decide(targetURLString, mutator: signer())
+        let installSignature = try XCTUnwrap(install.request.headers.first(name: "Signature"))
+        XCTAssertTrue(installSignature.hasPrefix("install=:"))
+        XCTAssertFalse(installSignature.contains("account="), "the default factory gives install only")
+
+        let both = try decide(targetURLString, mutator: signer { $0.setUseInstallAndAccountMessageSigning() })
+        let bothSignature = try XCTUnwrap(both.request.headers.first(name: "Signature"))
+        let bothInput = try XCTUnwrap(both.request.headers.first(name: "Signature-Input"))
+        XCTAssertTrue(bothSignature.contains("install=:") && bothSignature.contains("account=:"), bothSignature)
+        XCTAssertTrue(bothInput.contains("alg=\"ecdsa-p256-sha256\"") && bothInput.contains("alg=\"hmac-sha256\""), bothInput)
+
+        ApproovService.setServiceMutator(signer())
+        try ApproovService.initialize(config: validInitialConfig, comment: "reinit-signing-off")
+        let afterInit = ApproovService.updateRequestWithApproov(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: targetURLString)), method: "GET", headers: HTTPHeaders()))
+        XCTAssertNil(afterInit.request.headers.first(name: "Signature"), "initialize turns signing off (SPEC 3.1)")
+    }
+
+    // SPEC 3.5: with both selected, a member that cannot be produced is left out.
+    func testOneMemberFailsOpen() throws {
+        try reinitializeService(scenarioJSON: scenarioJSON(caseName: uniqueCaseName(prefix: "no-install-key"),
+                                                          body: "\"protectedDomains\": [\"\(try XCTUnwrap(URL(string: targetURLString)?.host))\"]"),
+                                comment: "options:no-install-key")
+        let response = try decide(targetURLString, mutator: signer { $0.setUseInstallAndAccountMessageSigning() })
+        let signature = try XCTUnwrap(response.request.headers.first(name: "Signature"), "the account member still signs")
+        XCTAssertTrue(signature.hasPrefix("account=:"))
+        XCTAssertFalse(signature.contains("install="))
+    }
+
     private func signatureCreated(_ response: ApproovUpdateResponse) throws -> Int64 {
         let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
         let range = try XCTUnwrap(input.range(of: #"created=(\d+)"#, options: .regularExpression))
