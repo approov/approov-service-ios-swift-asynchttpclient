@@ -117,6 +117,78 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(ApproovService.isApproovEnabled())
     }
 
+    func testInitializeResetsConfigurationButKeepsTheLoggingLevel() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setTokenHeader(header: "X-Custom", prefix: "Bearer ")
+        ApproovService.setTraceIDHeader(header: nil)
+        ApproovService.setUseApproovStatusIfNoToken(shouldUse: true)
+        ApproovService.bindHeader = "Authorization"
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
+        ApproovService.addSubstitutionQueryParam(key: "k")
+        ApproovService.addExclusionURLRegex(urlRegex: "^https://excluded")
+        ApproovService.setServiceMutator(ApproovDefaultMessageSigning())
+        setDirective("""
+            { "operation": "fetchApproovToken", "response": { "status": "REJECTED", "arc": "RESETARC" } }
+            """)
+        _ = try? ApproovService.fetchToken(url: targetURLString)
+        XCTAssertEqual(ApproovService.getLastARC(), "RESETARC", "control: an ARC is recorded")
+        ApproovService.setLoggingLevel(.warning)
+
+        try ApproovService.initialize(config: validInitialConfig, comment: "reinit-reset-check")
+
+        XCTAssertEqual(ApproovService.getTokenHeader(), "Approov-Token")
+        XCTAssertEqual(ApproovService.getTokenPrefix(), "")
+        XCTAssertEqual(ApproovService.getTraceIDHeader(), "Approov-TraceID")
+        XCTAssertFalse(ApproovService.getUseApproovStatusIfNoToken())
+        XCTAssertEqual(ApproovService.bindHeader, "")
+        XCTAssertTrue(ApproovService.getSubstitutionHeaders().isEmpty)
+        XCTAssertTrue(ApproovService.getSubstitutionQueryParams().isEmpty)
+        XCTAssertTrue(ApproovService.getExclusionURLRegexs().isEmpty)
+        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovServiceMutatorDefault)
+        XCTAssertEqual(ApproovService.getLastARC(), "")
+        XCTAssertEqual(ApproovService.logLevel, .warning, "initialize keeps the logging level (SPEC 5.10)")
+        ApproovService.setLoggingLevel(.off)
+    }
+
+    func testIgnoredAndFailedInitializeChangeNothing() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setTokenHeader(header: "X-Custom", prefix: nil)
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertEqual(ApproovService.getTokenHeader(), "X-Custom", "an empty account ID after protection is ignored")
+        XCTAssertThrowsError(try ApproovService.initialize(config: validInitialConfig, comment: "options:different"))
+        XCTAssertEqual(ApproovService.getTokenHeader(), "X-Custom", "a failed initialize changes nothing")
+    }
+
+    func testInvalidExclusionRegexIsLoggedAndIgnored() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.addExclusionURLRegex(urlRegex: "^https://excluded\\.example")
+        let lines = captureLogs(level: .error) {
+            ApproovService.addExclusionURLRegex(urlRegex: "([unclosed")
+        }
+        XCTAssertEqual(Set(ApproovService.getExclusionURLRegexs().keys), ["^https://excluded\\.example"])
+        XCTAssertTrue(lines.contains { $0.0 == .error && $0.1.contains("([unclosed") })
+    }
+
+    func testDirectMethodsInBypassModeUseTheNotInitializedTexts() throws {
+        ApproovService.resetForTesting()
+        try ApproovService.initialize(config: "", comment: nil)
+        let calls: [(String, () throws -> Void)] = [
+            ("fetchToken", { _ = try ApproovService.fetchToken(url: self.targetURLString) }),
+            ("fetchSecureString", { _ = try ApproovService.fetchSecureString(key: "k", newDef: nil) }),
+            ("fetchCustomJWT", { _ = try ApproovService.fetchCustomJWT(payload: "{}") }),
+            ("precheck", { try ApproovService.precheck() }),
+            ("setInstallAttrsInToken", { try ApproovService.setInstallAttrsInToken(attrs: "{}") })
+        ]
+        for (name, call) in calls {
+            XCTAssertThrowsError(try call()) { error in
+                guard case let ApproovError.permanentError(message) = error else {
+                    return XCTFail("\(name): expected permanentError, got \(error)")
+                }
+                XCTAssertEqual(message, "\(name): SDK not initialized")
+            }
+        }
+    }
+
     func testServiceAndProtectionFlags() throws {
         ApproovService.resetForTesting()
         XCTAssertFalse(ApproovService.isApproovServiceEnabled())
