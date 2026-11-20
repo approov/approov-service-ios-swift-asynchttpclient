@@ -7,6 +7,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [3.7.0] - Unreleased
 
 ### Added
+- `ApproovCloseFailureMutator.CLOSE_FAILURE` (the default), `ApproovAlwaysProceedMutator.ALWAYS_PROCEED` and `DEFAULT`, the named service mutators.
 - `setLoggingLevel(_:)` sets the logging level. `OFF` silences the layer.
 - `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()`, `setTraceIDHeader(header:)` and `getTraceIDHeader()`, the header names that every 3.7.x layer uses.
 - `isApproovServiceEnabled()`, `isApproovProtectionEnabled()` and `setInstallAttributes(_:)`.
@@ -15,6 +16,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Excluded vendored message signing license files from the target build source to prevent SwiftPM warnings.
 
 ### Changed
+- **Breaking:** a token fetch failure for a host that is not an Approov API domain no longer fails the request: it goes out untouched. A failure that proceeds to an API domain carries the token header with an empty token, or the status with `setUseApproovStatusIfNoToken`, and the trace header when the SDK supplied one.
+- **Breaking:** a secure string fetch never fails the request. A status other than `SUCCESS` is written into the placeholder, keeping a required prefix. Secure strings are substituted only on https to an API domain, including a secrets-only API (`UNPROTECTED_URL`). Every occurrence of a substitution query parameter is substituted.
+- **Breaking:** an error that a service mutator hook throws is a `URLError`: a `URLError` passes unchanged, and any other error becomes `URLError(.unknown)` with the original as the underlying error. The `CLOSE_FAILURE` decisions keep `ApproovError`. A required body digest that cannot be generated and an unsupported signature algorithm fail with `URLError(.unknown)`.
+- Error messages name the status as the SDK enum does (`REJECTED`, `NO_NETWORK`).
 - `getLastARC()` returns the ARC of the last fetch the layer made and makes no fetch of its own.
 - **Breaking:** `getMessageSignature(message:)` returns `String?` and no longer throws. It returns the account signature, as `getAccountMessageSignature` does.
 - The token and the secure string log lines are written at DEBUG only, and log lines no longer carry a URL query, a fragment or a pin.
@@ -24,6 +29,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
 
 ### Deprecated
+- `ApproovServiceMutatorDefault`. Use `ApproovCloseFailureMutator.DEFAULT` or `.CLOSE_FAILURE`.
 - `loggingLevel`, `approovTokenHeaderAndPrefix`, `getApproovTokenHeader()`, `setApproovTraceIDHeader(header:)`, `getApproovTraceIDHeader()` and `getMessageSignature(message:)`.
 
 ### Removed
