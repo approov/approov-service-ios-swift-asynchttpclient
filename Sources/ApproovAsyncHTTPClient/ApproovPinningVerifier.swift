@@ -21,6 +21,7 @@
 import Approov
 import CommonCrypto
 import Foundation
+import NIOConcurrencyHelpers
 
 public class ApproovPinningVerifier {
 
@@ -66,29 +67,62 @@ public class ApproovPinningVerifier {
      */
     public static func verifyPinning(sec_protocol_metadata: sec_protocol_metadata_t) -> Bool {
         var certChain: [SecCertificate] = []
-        if (
-            !sec_protocol_metadata_access_peer_certificate_chain(sec_protocol_metadata,
-                {
-                    sec_certificate in
-                    let cert: SecCertificate = sec_certificate_copy_ref(sec_certificate).takeRetainedValue()
-                    certChain.append(cert)
-                })
-        ) {
+        if !sec_protocol_metadata_access_peer_certificate_chain(sec_protocol_metadata, { secCertificate in
+            certChain.append(sec_certificate_copy_ref(secCertificate).takeRetainedValue())
+        }) {
             return false
         }
-        let serverNameOption = sec_protocol_metadata_get_server_name(sec_protocol_metadata)
-        if let serverNamePointer = serverNameOption {
-            let serverName = String(cString: UnsafePointer<CChar>(serverNamePointer))
-            do {
-                let isPinned = try ApproovPinningVerifier.verifyPinning(hostname: serverName, certChain: certChain)
-                return isPinned
-            } catch {
-                ApproovService.log(.error, "ApproovService: Pinning rejection for \(serverName). \(error.localizedDescription)")
-                return false
-            }
-        } else {
+        let serverName = sec_protocol_metadata_get_server_name(sec_protocol_metadata).map { String(cString: $0) }
+        let accepted: Bool
+        do {
+            accepted = try verifyPinning(serverName: serverName, certChain: certChain)
+        } catch {
+            ApproovService.log(.error, "ApproovService: Pinning rejection for \(serverName ?? "a connection without SNI"). \(error.localizedDescription)")
+            accepted = false
+        }
+        if !accepted, let serverName {
+            recordRejection(host: serverName)
+        }
+        return accepted
+    }
+
+    /**
+     * Verifies a connection by its SNI server name. A connection without SNI (an IP literal host) cannot be
+     * matched to a host: it is accepted on OS trust when no IP literal has Approov pins, and fails closed when
+     * one has, because the layer cannot tell which host it is.
+     */
+    static func verifyPinning(serverName: String?, certChain: [SecCertificate], verifyDate: Date? = nil) throws -> Bool {
+        if let serverName {
+            return try verifyPinning(hostname: serverName, certChain: certChain, verifyDate: verifyDate)
+        }
+        var serverTrust: SecTrust?
+        guard SecTrustCreateWithCertificates(certChain as CFArray, SecPolicyCreateSSL(true, nil), &serverTrust) == errSecSuccess,
+              let trust = serverTrust else {
+            throw ApproovError.pinningError(message: "Error during certificate trust creation for a connection without SNI")
+        }
+        if let verifyDate {
+            SecTrustSetVerifyDate(trust, verifyDate as CFDate)
+        }
+        guard SecTrustEvaluateWithError(trust, nil) else {
+            throw ApproovError.pinningError(message: "Error: Certificate Trust Evaluation failure for a connection without SNI")
+        }
+        guard ApproovService.isApproovEnabled() else {
+            return true
+        }
+        let pins = Approov.getPins("public-key-sha256") ?? [:]
+        let pinnedIPLiteral = pins.contains { key, value in key != "*" && !value.isEmpty && isIPLiteral(key) }
+        if pinnedIPLiteral {
+            ApproovService.log(.error, "ApproovService: Pinning rejection for a connection without SNI: an IP address has Approov pins")
             return false
         }
+        return true
+    }
+
+    private static func isIPLiteral(_ host: String) -> Bool {
+        var v4 = in_addr()
+        var v6 = in6_addr()
+        let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return inet_pton(AF_INET, bare, &v4) == 1 || inet_pton(AF_INET6, bare, &v6) == 1
     }
 
     /**
@@ -193,22 +227,18 @@ public class ApproovPinningVerifier {
             throw ApproovError.pinningError(message: "Approov SDK getPins() call failed")
         }
 
-        // Get the receivers host
-        guard var certHashesBase64 = approovCertHashes[host] else {
-            // Host is not pinned
+        // SPEC 2.6: exact per host, without regard to case and one trailing dot, on the host and the keys.
+        // "*" is the Managed Trust Roots, never a pattern.
+        let wanted = ApproovService.normalisedHost(host)
+        guard var certHashesBase64 = approovCertHashes.first(where: { $0.key != "*" && ApproovService.normalisedHost($0.key) == wanted })?.value else {
             ApproovService.log(.debug, "ApproovService: Pin verification \(host) unpinned")
             return true
         }
-        
-        // Check whether we have pins defined for this host
-        if certHashesBase64.count == 0 {
-            // There are no pins defined for this host, check for managed trust roots
-            if let managedTrustRootHashesBase64 = approovCertHashes["*"] {
-                certHashesBase64 = managedTrustRootHashesBase64
-            } else {
-                // There are no managed trust roots either, accept connection. We do not pin connections
-                // where no pins are explicitly set for the host.
-                ApproovService.log(.info, "ApproovService: Pin verification \(host) empty pins")
+        if certHashesBase64.isEmpty {
+            certHashesBase64 = approovCertHashes["*"] ?? []
+            if certHashesBase64.isEmpty {
+                // SPEC 2.4, 2.6: no host pins and no Managed Trust Roots: OS trust, one warning per host and pin set
+                warnOfOSTrust(host: wanted, pins: approovCertHashes)
                 return true
             }
         }
@@ -233,6 +263,30 @@ public class ApproovPinningVerifier {
         // No match in current set of pins from Approov SDK and certificate chain seen during TLS handshake
         ApproovService.log(.error, "ApproovService: Pinning rejection for \(host)")
         return false
+    }
+
+    private static let stateLock = NIOLock()
+    private static var warnedPins: [String: [String]] = [:]
+    private static var warnedHosts: Set<String> = []
+    private static var rejections: [String: TimeInterval] = [:]
+
+    /** Logs one warning per host while the pin set does not change (SPEC 2.6). The warning names the host, never a pin. */
+    private static func warnOfOSTrust(host: String, pins: [String: [String]]) {
+        let firstTime = stateLock.withLock { () -> Bool in
+            if warnedPins != pins {
+                warnedPins = pins
+                warnedHosts = []
+            }
+            return warnedHosts.insert(host).inserted
+        }
+        if firstTime {
+            ApproovService.log(.warning, "ApproovService: \(host) has no pins and no Managed Trust Roots; its connections use OS trust only")
+        }
+    }
+
+    /** Records that the verifier rejected a connection to a host, for the error mapping of Task 2. */
+    static func recordRejection(host: String) {
+        stateLock.withLock { rejections[ApproovService.normalisedHost(host)] = ProcessInfo.processInfo.systemUptime }
     }
 
     /**

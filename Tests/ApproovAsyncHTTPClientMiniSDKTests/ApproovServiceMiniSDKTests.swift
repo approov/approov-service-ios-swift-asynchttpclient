@@ -800,6 +800,55 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                       "A managed trust root pin must match the root that trust evaluation added")
     }
 
+    private func applePinFixture() throws -> (leaf: SecCertificate, ca: SecCertificate, caPin: String, rootPin: String) {
+        let leaf = try fixtureCertificate(PinningTestCertificates.appleLeaf)
+        let ca = try fixtureCertificate(PinningTestCertificates.appleEVCA)
+        let root = try XCTUnwrap(try validatedPath([leaf, ca], host: "www.apple.com").last)
+        return (leaf, ca, try spkiPin(ca), try spkiPin(root))
+    }
+
+    // T37-22: lookup ignores case and one trailing dot, on the host and on the key.
+    func testPinLookupIgnoresCaseAndTrailingDot() throws {
+        let f = try applePinFixture()
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "WWW.Apple.COM.": ["\(f.caPin)"] } }
+            """)
+        XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(hostname: "www.apple.com", certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate))
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "www.apple.com": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="] } }
+            """)
+        XCTAssertFalse(try ApproovPinningVerifier.verifyPinning(hostname: "WWW.APPLE.COM.", certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate),
+                       "control: the normalised host still finds its pins")
+    }
+
+    // T37-21: a listed host with no pins and an empty "*" connects on OS trust, with one warning per host.
+    func testEmptyManagedTrustRootsFallBackToOSTrustWithOneWarning() throws {
+        let f = try applePinFixture()
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "www.apple.com": [], "*": [] } }
+            """)
+        let lines = try captureLogs(level: .warning) {
+            XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(hostname: "www.apple.com", certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate))
+            XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(hostname: "www.apple.com", certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate))
+        }
+        let warnings = lines.filter { $0.0 == .warning && $0.1.contains("www.apple.com") }
+        XCTAssertEqual(warnings.count, 1, "one warning per host: \(lines)")
+        XCTAssertFalse(lines.contains { $0.1.contains(f.caPin) || $0.1.contains(f.rootPin) }, "never a pin")
+    }
+
+    // A connection without SNI (an IP literal host) cannot be matched to a host.
+    func testConnectionWithoutServerName() throws {
+        let f = try applePinFixture()
+        try reinitializeServiceWithTargetHost()
+        XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(serverName: nil, certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate),
+                      "no IP literal is pinned, so the connection uses OS trust")
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "192.0.2.1": ["\(f.caPin)"] } }
+            """)
+        XCTAssertFalse(try ApproovPinningVerifier.verifyPinning(serverName: nil, certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate),
+                       "an IP literal is pinned and the host is unknown, so the connection fails closed")
+    }
+
     func testPerRequestTLSWithoutFullVerificationIsRejected() throws {
         try reinitializeServiceWithTargetHost()
         var tls = TLSConfiguration.makeClientConfiguration()
