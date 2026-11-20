@@ -20,7 +20,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         try super.setUpWithError()
         MiniSDKAttesterProxyController.reset()
         ApproovService.resetForTesting()
-        ApproovService.loggingLevel = .off
+        ApproovService.setLoggingLevel(.off)
         try initializeService(comment: "reinit-asynchttpclient-tests")
     }
 
@@ -52,7 +52,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let domainsJSON = "\"protectedDomains\": [\"\(targetHost)\"]"
         MiniSDKAttesterProxyController.loadScenarioJSON(scenarioJSON(caseName: uniqueCaseName(prefix: "target-host"), body: domainsJSON))
         ApproovService.resetForTesting()
-        ApproovService.loggingLevel = .off
+        ApproovService.setLoggingLevel(.off)
         try ApproovService.initialize(config: "", comment: "reinit-empty-config")
 
         XCTAssertTrue(ApproovService.isInitialized())
@@ -71,7 +71,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let domainsJSON = "\"protectedDomains\": [\"\(targetHost)\"]"
         MiniSDKAttesterProxyController.loadScenarioJSON(scenarioJSON(caseName: uniqueCaseName(prefix: "target-host"), body: domainsJSON))
         ApproovService.resetForTesting()
-        ApproovService.loggingLevel = .off
+        ApproovService.setLoggingLevel(.off)
         try ApproovService.initialize(config: "", comment: "reinit-empty-config")
 
         XCTAssertTrue(ApproovService.isInitialized())
@@ -1191,6 +1191,48 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
+    // MARK: - §5.10 Logging
+
+    func testLoggingOffSilencesTheLayer() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .off) {
+            _ = fetchNetworkReply(for: try HTTPClient.Request(url: targetURLString + "/p?x=1", method: .GET))
+        }
+        XCTAssertTrue(lines.isEmpty, "OFF must silence the layer: \(lines)")
+    }
+
+    func testTokenLineIsDebugOnlyAndCarriesNoQueryOrFragment() throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString + "/p?q=query-value#fragment-value"
+        let infoLines = try captureLogs(level: .info) {
+            _ = fetchNetworkReply(for: try HTTPClient.Request(url: url, method: .GET))
+        }
+        XCTAssertFalse(infoLines.contains { $0.1.contains("updateRequest") }, "the token line is DEBUG only")
+
+        let debugLines = try captureLogs(level: .debug) {
+            _ = fetchNetworkReply(for: try HTTPClient.Request(url: url, method: .GET))
+        }
+        XCTAssertTrue(debugLines.contains { $0.0 == .debug && $0.1.contains("updateRequest") }, "control: token line at DEBUG")
+        XCTAssertFalse(debugLines.contains { $0.1.contains("query-value") || $0.1.contains("fragment-value") },
+                       "no line carries a query or a fragment: \(debugLines.map { $0.1 })")
+    }
+
+    func testPinningLinesGoThroughTheLogAndCarryNoPin() throws {
+        let host = "www.apple.com"
+        let leaf = try fixtureCertificate(PinningTestCertificates.appleLeaf)
+        let intermediate = try fixtureCertificate(PinningTestCertificates.appleEVCA)
+        let rootPin = try spkiPin(try XCTUnwrap(try validatedPath([leaf, intermediate], host: host).last))
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "\(host)": [], "*": ["\(rootPin)"] } }
+            """)
+        let lines = try captureLogs(level: .debug) {
+            XCTAssertTrue(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: [leaf, intermediate],
+                                                                   verifyDate: pinningFixtureDate))
+        }
+        XCTAssertTrue(lines.contains { $0.1.contains("Matched pin") }, "control: the match line reaches the log")
+        XCTAssertFalse(lines.contains { $0.1.contains(rootPin) }, "no line carries a pin (SPEC 2.6)")
+    }
+
     // MARK: - Test Helpers
 
     private var targetURLString: String {
@@ -1249,6 +1291,18 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         return obj
     }
 
+    private func captureLogs(level: ApproovLogLevel, _ body: () throws -> Void) rethrows -> [(ApproovLogLevel, String)] {
+        let lines = NIOLockedValueBox<[(ApproovLogLevel, String)]>([])
+        ApproovService.logSink = { lineLevel, line in lines.withLockedValue { $0.append((lineLevel, line)) } }
+        ApproovService.setLoggingLevel(level)
+        defer {
+            ApproovService.logSink = nil
+            ApproovService.setLoggingLevel(.off)
+        }
+        try body()
+        return lines.withLockedValue { $0 }
+    }
+
     private func getHeader(from reply: [String: Any]?, key: String) -> String? {
         guard let headers = reply?["headers"] as? [String: Any] else { return nil }
         let lowerKey = key.lowercased()
@@ -1290,7 +1344,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             MiniSDKAttesterProxyController.loadScenarioJSON(scenarioJSON)
         }
         ApproovService.resetForTesting()
-        ApproovService.loggingLevel = .off
+        ApproovService.setLoggingLevel(.off)
         try initializeService(comment: comment)
     }
 

@@ -126,19 +126,73 @@ public class ApproovService {
     /** The mutator instance used to control ApproovService behavior at key points in the flow. */
     private static var _serviceMutator: ApproovServiceMutator = ApproovServiceMutatorDefault.shared
 
-    /** Current logging level */
-    private static var _loggingLevel: ApproovLogLevel = .info
-
     /** The ARC of the most recent fetch the layer made, from the request path or a direct method (SPEC 5.3) */
     private static var _lastARC = ""
 
+    /** Lock for the logging level and the test log sink */
+    private static let logLock = NIOLock()
+
+    /** Current logging level (SPEC 5.10); initialize never resets it */
+    private static var _logLevel: ApproovLogLevel = .info
+
+    /** Receives every line that the layer writes, with its level. For tests only. */
+    private static var _logSink: ((ApproovLogLevel, String) -> Void)? = nil
+
+    static var logLevel: ApproovLogLevel {
+        get { logLock.withLock { _logLevel } }
+        set { logLock.withLock { _logLevel = newValue } }
+    }
+
+    static var logSink: ((ApproovLogLevel, String) -> Void)? {
+        get { logLock.withLock { _logSink } }
+        set { logLock.withLock { _logSink = newValue } }
+    }
+
+    @available(*, deprecated, renamed: "setLoggingLevel(_:)")
     public static var loggingLevel: ApproovLogLevel {
-        get {
-            stateLock.withLock { _loggingLevel }
+        get { logLevel }
+        set { logLevel = newValue }
+    }
+
+    /**
+     * Sets the logging level of the layer (SPEC 5.10). Each level writes its own severity and the more severe
+     * ones. OFF silences the layer. It can be called at any time, and initialize does not change it.
+     */
+    public static func setLoggingLevel(_ level: ApproovLogLevel) {
+        logLevel = level
+    }
+
+    /**
+     * Writes one log line if the logging level allows its level. Every line of the layer goes through here,
+     * so OFF silences the layer. The message is built only if the line is written.
+     */
+    static func log(_ level: ApproovLogLevel, _ message: @autoclosure () -> String) {
+        guard level != .off, logLevel >= level else {
+            return
         }
-        set {
-            stateLock.withLock { _loggingLevel = newValue }
+        let line = message()
+        logSink?(level, line)
+        let type: OSLogType
+        switch level {
+        case .error: type = .error
+        case .info: type = .info
+        case .debug: type = .debug
+        default: type = .default
         }
+        os_log("%{public}@", type: type, line)
+    }
+
+    /**
+     * Gets the form of a URL for a log line: scheme, host, port and path. It has no user info, query or
+     * fragment (SPEC 5.10).
+     */
+    static func loggableURL(_ url: URL) -> String {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme, let host = components.host else {
+            return "<url>"
+        }
+        let port = components.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)\(components.percentEncodedPath)"
     }
 
     /**
@@ -149,24 +203,18 @@ public class ApproovService {
         try initLock.withLock {
             let isEnabled = !config.isEmpty
             if approovSDKInitialised && config.isEmpty && !(_approovConfigString?.isEmpty ?? true) {
-                if loggingLevel >= .info {
-                    os_log("ApproovService already initialized with a valid config; ignoring empty configuration", type: .info)
-                }
+                log(.info, "ApproovService already initialized with a valid config; ignoring empty configuration")
                 return
             }
 
             if isEnabled {
                 do {
                     try Approov.initialize(config, updateConfig: "auto", comment: comment)
-                    if loggingLevel >= .info {
-                        os_log("ApproovService: Approov SDK initialized", type: .info)
-                    }
+                    log(.info, "ApproovService: Approov SDK initialized")
                 } catch {
                     let nsError = error as NSError
                     if nsError.code == 0, nsError.domain == "Foundation._GenericObjCError" {
-                        if loggingLevel >= .info {
-                            os_log("ApproovService: Approov SDK already initialized", type: .info)
-                        }
+                        log(.info, "ApproovService: Approov SDK already initialized")
                     } else {
                         throw ApproovError.initializationFailure(message: "Error initializing Approov SDK: \(nsError.localizedDescription)")
                     }
@@ -248,17 +296,16 @@ public class ApproovService {
      * at all" so the two states can be told apart in the logs.
      */
     private static func logApproovUnavailable(_ method: String) {
-        guard loggingLevel >= .error else {
+        guard logLevel >= .error else {
             return
         }
         let (initialized, enabled) = initLock.withLock {
             (approovSDKInitialised, isApproovEnabledInternal)
         }
         if initialized && !enabled {
-            os_log("ApproovService: %@: Approov is disabled (initialized in bypass mode); ignoring call",
-                   type: .error, method)
+            log(.error, "ApproovService: \(method): Approov is disabled (initialized in bypass mode); ignoring call")
         } else {
-            os_log("ApproovService: %@: service layer not initialized", type: .error, method)
+            log(.error, "ApproovService: \(method): service layer not initialized")
         }
     }
 
@@ -351,9 +398,7 @@ public class ApproovService {
             return
         }
         Approov.setDevKey(devKey)
-        if loggingLevel >= .debug {
-            os_log("ApproovService: setDevKey", type: .debug)
-        }
+        log(.debug, "ApproovService: setDevKey")
     }
 
     /**
@@ -507,18 +552,14 @@ public class ApproovService {
         let changes = ApproovRequestMutations()
 
         if !isApproovEnabled() {
-            if loggingLevel >= .info {
-                os_log("ApproovService: Approov unavailable, forwarding: %@", type: .info, url.absoluteString)
-            }
+            log(.info, "ApproovService: Approov unavailable, forwarding: \(loggableURL(url))")
             return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
         }
 
         let mutator = getServiceMutator()
         do {
             if try !mutator.handleInterceptorShouldProcessRequest(request) {
-                if loggingLevel >= .info {
-                    os_log("ApproovService: excluded, forwarding: %@", type: .info, url.absoluteString)
-                }
+                log(.info, "ApproovService: excluded, forwarding: \(loggableURL(url))")
                 return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
             }
         } catch {
@@ -547,14 +588,10 @@ public class ApproovService {
         let approovResult = Approov.fetchTokenAndWait(url.absoluteString)
         recordLastARC(approovResult)
         let hostname = url.host ?? ""
-        if loggingLevel >= .info {
-            os_log("ApproovService: updateRequest %@: %@", type: .info, hostname, approovResult.loggableToken())
-        }
+        log(.debug, "ApproovService: updateRequest \(loggableURL(url)): \(approovResult.loggableToken())")
         if approovResult.isConfigChanged {
             Approov.fetchConfig()
-            if loggingLevel >= .info {
-                os_log("ApproovService: dynamic configuration update received")
-            }
+            log(.info, "ApproovService: dynamic configuration update received")
         }
 
         response.sdkMessage = Approov.string(from: approovResult.status)
@@ -606,9 +643,7 @@ public class ApproovService {
                     let lookupKey = String(value.dropFirst(prefix.count))
                     let approovResults = Approov.fetchSecureStringAndWait(lookupKey, nil)
                     recordLastARC(approovResults)
-                    if loggingLevel >= .info {
-                        os_log("ApproovService: Substituting header: %@, %@", type: .info, header, Approov.string(from: approovResults.status))
-                    }
+                    log(.debug, "ApproovService: Substituting header: \(header), \(Approov.string(from: approovResults.status))")
 
                     do {
                         if try mutator.handleInterceptorHeaderSubstitutionResult(approovResults, header: header) {
@@ -650,10 +685,7 @@ public class ApproovService {
                         let queryValue = String(updateURLString[substringRange])
                         let approovResults = Approov.fetchSecureStringAndWait(String(queryValue), nil)
                         recordLastARC(approovResults)
-                        if loggingLevel >= .info {
-                            os_log("ApproovService: Attempting query parameter substitution: %@, %@", entry,
-                                Approov.string(from: approovResults.status))
-                        }
+                        log(.debug, "ApproovService: Attempting query parameter substitution: \(entry), \(Approov.string(from: approovResults.status))")
 
                         do {
                             if try mutator.handleInterceptorQueryParamSubstitutionResult(approovResults, queryKey: entry) {
@@ -726,9 +758,7 @@ public class ApproovService {
     public static func addSubstitutionHeader(header: String, prefix: String?) {
         stateLock.withLock {
             substitutionHeaders[header] = prefix ?? ""
-            if _loggingLevel >= .debug {
-                os_log("ApproovService: addSubstitutionHeader: %@ %@", type: .debug, header, prefix ?? "")
-            }
+            log(.debug, "ApproovService: addSubstitutionHeader: \(header) \(prefix ?? "")")
         }
     }
 
@@ -740,9 +770,7 @@ public class ApproovService {
             if substitutionHeaders[header] != nil {
                 substitutionHeaders.removeValue(forKey: header)
             }
-            if _loggingLevel >= .debug {
-                os_log("ApproovService: removeSubstitutionHeader: %@", type: .debug, header)
-            }
+            log(.debug, "ApproovService: removeSubstitutionHeader: \(header)")
         }
     }
 
@@ -756,9 +784,7 @@ public class ApproovService {
     public static func addSubstitutionQueryParam(key: String) {
         stateLock.withLock {
             substitutionQueryParams.insert(key)
-            if _loggingLevel >= .debug {
-                os_log("ApproovService: addSubstitutionQueryParam: %@", type: .debug, key)
-            }
+            log(.debug, "ApproovService: addSubstitutionQueryParam: \(key)")
         }
     }
 
@@ -768,9 +794,7 @@ public class ApproovService {
     public static func removeSubstitutionQueryParam(key: String) {
         stateLock.withLock {
             substitutionQueryParams.remove(key)
-            if _loggingLevel >= .debug {
-                os_log("ApproovService: removeSubstitutionQueryParam: %@", type: .debug, key)
-            }
+            log(.debug, "ApproovService: removeSubstitutionQueryParam: \(key)")
         }
     }
 
@@ -786,16 +810,11 @@ public class ApproovService {
             do {
                 let regex = try NSRegularExpression(pattern: urlRegex, options: [])
                 exclusionURLRegexs[urlRegex] = regex
-                if _loggingLevel >= .debug {
-                    os_log("ApproovService: addExclusionURLRegex: %@", type: .debug, urlRegex)
-                }
+                log(.debug, "ApproovService: addExclusionURLRegex: \(urlRegex)")
             } catch {
                 // The pattern was rejected and no exclusion was registered; surface this at error
                 // level so callers are not left believing an invalid regex took effect.
-                if _loggingLevel >= .error {
-                    os_log("ApproovService: addExclusionURLRegex: %@ rejected, exclusion NOT added: %@",
-                           type: .error, urlRegex, error.localizedDescription)
-                }
+                log(.error, "ApproovService: addExclusionURLRegex: \(urlRegex) rejected, exclusion NOT added: \(error.localizedDescription)")
             }
         }
     }
@@ -807,9 +826,7 @@ public class ApproovService {
         stateLock.withLock {
             if exclusionURLRegexs[urlRegex] != nil {
                 exclusionURLRegexs.removeValue(forKey: urlRegex)
-                if _loggingLevel >= .debug {
-                    os_log("ApproovService: removeExclusionURLRegex: %@", type: .debug, urlRegex)
-                }
+                log(.debug, "ApproovService: removeExclusionURLRegex: \(urlRegex)")
             }
         }
     }
@@ -828,9 +845,7 @@ public class ApproovService {
         }
         let deviceID = Approov.getDeviceID()
         if (deviceID != nil) {
-            if loggingLevel >= .debug {
-                os_log("ApproovService: getDeviceID %@", type: .debug, deviceID!)
-            }
+            log(.debug, "ApproovService: getDeviceID \(deviceID!)")
         }
         return deviceID
     }
@@ -843,9 +858,7 @@ public class ApproovService {
             logApproovUnavailable("setDataHashInToken")
             return
         }
-        if loggingLevel >= .debug {
-            os_log("ApproovService: setDataHashInToken", type: .debug)
-        }
+        log(.debug, "ApproovService: setDataHashInToken")
         Approov.setDataHashInToken(data)
     }
 
@@ -859,9 +872,7 @@ public class ApproovService {
         }
         let result = Approov.fetchTokenAndWait(url)
         recordLastARC(result)
-        if loggingLevel >= .debug {
-            os_log("ApproovService: fetchToken: %@", type: .debug, Approov.string(from: result.status))
-        }
+        log(.debug, "ApproovService: fetchToken: \(Approov.string(from: result.status))")
         try wrappingApproovError("fetchToken") {
             try getServiceMutator().handleFetchTokenResult(result)
         }
@@ -877,9 +888,7 @@ public class ApproovService {
             throw ApproovError.permanentError(message: "setInstallAttrsInToken: SDK not initialized")
         }
         Approov.setInstallAttrsInToken(attrs)
-        if loggingLevel >= .debug {
-            os_log("ApproovService: setInstallAttrsInToken", type: .debug)
-        }
+        log(.debug, "ApproovService: setInstallAttrsInToken")
     }
 
     /**
@@ -926,9 +935,7 @@ public class ApproovService {
         let type = newDef != nil ? "definition" : "lookup"
         let approovResult = Approov.fetchSecureStringAndWait(key, newDef)
         recordLastARC(approovResult)
-        if loggingLevel >= .info {
-            os_log("ApproovService: fetchSecureString: %@: %@", type: .info, type, Approov.string(from: approovResult.status))
-        }
+        log(.info, "ApproovService: fetchSecureString: \(type): \(Approov.string(from: approovResult.status))")
         try wrappingApproovError("fetchSecureString \(type) for \(key)") {
             try getServiceMutator().handleFetchSecureStringResult(approovResult, operation: type, key: key)
         }
@@ -945,9 +952,7 @@ public class ApproovService {
         }
         let approovResult = Approov.fetchCustomJWTAndWait(payload)
         recordLastARC(approovResult)
-        if loggingLevel >= .info {
-            os_log("ApproovService: fetchCustomJWT: %@", type: .info, Approov.string(from: approovResult.status))
-        }
+        log(.info, "ApproovService: fetchCustomJWT: \(Approov.string(from: approovResult.status))")
         try wrappingApproovError("fetchCustomJWT") {
             try getServiceMutator().handleFetchCustomJWTResult(approovResult)
         }
@@ -965,13 +970,9 @@ public class ApproovService {
         let approovResults = Approov.fetchSecureStringAndWait("precheck-dummy-key", nil)
         recordLastARC(approovResults)
         if approovResults.status == ApproovTokenFetchStatus.unknownKey {
-            if loggingLevel >= .debug {
-                os_log("ApproovService: precheck: success", type: .debug)
-            }
+            log(.debug, "ApproovService: precheck: success")
         } else {
-            if loggingLevel >= .debug {
-                os_log("ApproovService: precheck: %@", type: .debug, Approov.string(from: approovResults.status))
-            }
+            log(.debug, "ApproovService: precheck: \(Approov.string(from: approovResults.status))")
         }
         try wrappingApproovError("precheck") {
             try getServiceMutator().handlePrecheckResult(approovResults)

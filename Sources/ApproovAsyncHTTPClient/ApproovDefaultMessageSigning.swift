@@ -16,7 +16,6 @@
 
 import CommonCrypto
 import Foundation
-import os.log
 import RawStructuredFieldValues
 import NIOHTTP1
 
@@ -139,9 +138,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             do {
                 message = try baseBuilder.createSignatureBase()
             } catch {
-                if ApproovService.loggingLevel >= .error {
-                    os_log("ApproovService: failed to build the signature base, skipping signing: %@", type: .error, error.localizedDescription)
-                }
+                ApproovService.log(.error, "ApproovService: failed to build the signature base, skipping signing: \(error.localizedDescription)")
                 return provider.getRequest()
             }
             // WARNING never log the message as it contains an Approov token which provides access to your API.
@@ -157,9 +154,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 // unsigned and log at error level, rather than aborting the request.
                 guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
                       let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    if ApproovService.loggingLevel >= .error {
-                        os_log("ApproovService: install message signature unavailable, skipping signing", type: .error)
-                    }
+                    ApproovService.log(.error, "ApproovService: install message signature unavailable, skipping signing")
                     return provider.getRequest()
                 }
                 // Decode the signature from ASN.1 DER format. A malformed signature is also treated as
@@ -167,10 +162,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 do {
                     signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
                 } catch {
-                    if ApproovService.loggingLevel >= .error {
-                        os_log("ApproovService: failed to decode ASN.1 DER install signature, skipping signing: %@",
-                               type: .error, error.localizedDescription)
-                    }
+                    ApproovService.log(.error, "ApproovService: failed to decode ASN.1 DER install signature, skipping signing: \(error.localizedDescription)")
                     return provider.getRequest()
                 }
             case ApproovDefaultMessageSigning.ALG_HS256:
@@ -179,9 +171,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 // no mksid yet, or a value that cannot be base64-decoded) we proceed unsigned and log.
                 guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
                       let decodedSignature = Data(base64Encoded: base64Signature) else {
-                    if ApproovService.loggingLevel >= .error {
-                        os_log("ApproovService: account message signature unavailable, skipping signing", type: .error)
-                    }
+                    ApproovService.log(.error, "ApproovService: account message signature unavailable, skipping signing")
                     return provider.getRequest()
                 }
                 signature = decodedSignature
@@ -198,17 +188,13 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
             do {
                 guard let sh = try SFV.serializeDictionary(key: sigId, data: signature),
                       let sih = try SFV.serializeDictionary(key: sigId, innerList: params.toComponentValue()) else {
-                    if ApproovService.loggingLevel >= .error {
-                        os_log("ApproovService: failed to serialize signature headers, skipping signing", type: .error)
-                    }
+                    ApproovService.log(.error, "ApproovService: failed to serialize signature headers, skipping signing")
                     return provider.getRequest()
                 }
                 sigHeader = sh
                 sigInputHeader = sih
             } catch {
-                if ApproovService.loggingLevel >= .error {
-                    os_log("ApproovService: failed to serialize signature headers, skipping signing: %@", type: .error, error.localizedDescription)
-                }
+                ApproovService.log(.error, "ApproovService: failed to serialize signature headers, skipping signing: \(error.localizedDescription)")
                 return provider.getRequest()
             }
 
@@ -223,9 +209,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 if let sigBaseDigestHeader = (try? SFV.serializeDictionary(key: "sha-256", data: digest)) ?? nil {
                     signedRequest.headers.replaceOrAdd(name: "Signature-Base-Digest", value: sigBaseDigestHeader)
                 } else {
-                    if ApproovService.loggingLevel >= .debug {
-                        os_log("ApproovService: Failed to get digest algorithm - no debug entry", type: .debug)
-                    }
+                    ApproovService.log(.debug, "ApproovService: Failed to get digest algorithm - no debug entry")
                 }
             }
 
@@ -369,9 +353,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         do {
             try defaultSignatureParametersFactory.setBodyDigestConfig(ApproovDefaultMessageSigning.DIGEST_SHA256, required: false)
         } catch {
-            if ApproovService.loggingLevel >= .error {
-                os_log("ApproovDefaultMessageSigning - generateDefaultSignatureParametersFactory: Failed to set default body digest algorithm", type: .error)
-            }
+            ApproovService.log(.error, "ApproovDefaultMessageSigning - generateDefaultSignatureParametersFactory: Failed to set default body digest algorithm")
         }
         return defaultSignatureParametersFactory
     }

@@ -21,7 +21,6 @@
 import Approov
 import CommonCrypto
 import Foundation
-import os.log
 
 public class ApproovPinningVerifier {
 
@@ -84,7 +83,7 @@ public class ApproovPinningVerifier {
                 let isPinned = try ApproovPinningVerifier.verifyPinning(hostname: serverName, certChain: certChain)
                 return isPinned
             } catch {
-                os_log("ApproovService: Pinning rejection for %@. %@", type: .error, serverName, error.localizedDescription)
+                ApproovService.log(.error, "ApproovService: Pinning rejection for \(serverName). \(error.localizedDescription)")
                 return false
             }
         } else {
@@ -185,7 +184,7 @@ public class ApproovPinningVerifier {
     static func hasApproovPinMatch(host: String, certChain: [SecCertificate]) throws -> Bool {
         // Check if pinning should process for this host
         if !ApproovService.getServiceMutator().handlePinningShouldProcessRequest(hostname: host) {
-            os_log("ApproovService: Pin verification for %@ bypassed by service mutator", type: .info, host)
+            ApproovService.log(.info, "ApproovService: Pin verification for \(host) bypassed by service mutator")
             return true
         }
         
@@ -197,7 +196,7 @@ public class ApproovPinningVerifier {
         // Get the receivers host
         guard var certHashesBase64 = approovCertHashes[host] else {
             // Host is not pinned
-            os_log("ApproovService: Pin verification %@ unpinned", host)
+            ApproovService.log(.debug, "ApproovService: Pin verification \(host) unpinned")
             return true
         }
         
@@ -209,7 +208,7 @@ public class ApproovPinningVerifier {
             } else {
                 // There are no managed trust roots either, accept connection. We do not pin connections
                 // where no pins are explicitly set for the host.
-                os_log("ApproovService: Pin verification %@ empty pins", host)
+                ApproovService.log(.info, "ApproovService: Pin verification \(host) empty pins")
                 return true
             }
         }
@@ -222,17 +221,17 @@ public class ApproovPinningVerifier {
                 for certHashBase64 in certHashesBase64 {
                     let certHash = Data(base64Encoded: certHashBase64)
                     if publicKeyHash == certHash {
-                        os_log("ApproovService: Matched pin %@ for %@ from %d pins", certHashBase64, host, certHashesBase64.count)
+                        ApproovService.log(.debug, "ApproovService: Matched pin for \(host) from \(certHashesBase64.count) pins")
                         return true
                     }
                 }
             } else {
-                os_log("ApproovService: Skipping pin checking for unknown certificate type")
+                ApproovService.log(.debug, "ApproovService: Skipping pin checking for unknown certificate type")
             }
         }
         
         // No match in current set of pins from Approov SDK and certificate chain seen during TLS handshake
-        os_log("ApproovService: Pinning rejection for %@", type: .error, host)
+        ApproovService.log(.error, "ApproovService: Pinning rejection for \(host)")
         return false
     }
 
