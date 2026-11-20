@@ -428,6 +428,30 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "The blocking Approov update ran on the Swift concurrency pool: \(label)")
     }
 
+    // T37-26: the mini SDK classifies hosts as the real SDK does.
+
+    func testMiniSDKReportsUnknownURLForHostNotAdded() throws {
+        try reinitializeServiceWithTargetHost()
+        let result = Approov.fetchTokenAndWait(unprotectedURLString)
+        XCTAssertEqual(result.status, .unknownURL)
+        XCTAssertEqual(result.token, "")
+    }
+
+    func testMiniSDKReportsUnprotectedURLForEmptyToken() throws {
+        let host = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        try reinitializeServiceWithTargetHost(scenarioBody: "\"noApproovTokenDomains\": [\"\(host)\"]")
+        let result = Approov.fetchTokenAndWait(unprotectedURLString)
+        XCTAssertEqual(result.status, .unprotectedURL)
+        XCTAssertEqual(result.token, "")
+    }
+
+    func testMiniSDKNeverReportsSuccessWithEmptyToken() throws {
+        try reinitializeServiceWithTargetHost()
+        let result = Approov.fetchTokenAndWait(targetURLString)
+        XCTAssertEqual(result.status, .success)
+        XCTAssertFalse(result.token.isEmpty)
+    }
+
     // MARK: - §3 Service Mutators & Decision Overrides
 
     struct AlwaysProceedMutator: ApproovServiceMutator {
