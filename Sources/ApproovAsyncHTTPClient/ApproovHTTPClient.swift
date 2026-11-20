@@ -486,10 +486,15 @@ extension ApproovHTTPClient {
         deadline: NIODeadline,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
+        let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
             try ApproovHTTPClient.approovUpdateRequest(request: request)
         }
-        return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
+        do {
+            return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
+        } catch {
+            throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: updatedRequest.url)?.host, since: start)
+        }
     }
 
     /// Execute arbitrary HTTP requests.
@@ -504,10 +509,15 @@ extension ApproovHTTPClient {
         timeout: TimeAmount,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
+        let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
             try ApproovHTTPClient.approovUpdateRequest(request: request)
         }
-        return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
+        do {
+            return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
+        } catch {
+            throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: updatedRequest.url)?.host, since: start)
+        }
     }
 
     /// Runs blocking Approov work on a Dispatch queue. The token fetch blocks its thread, and the Swift
@@ -672,6 +682,7 @@ extension ApproovHTTPClient {
         // using an HTTPClient
         public func runInBackground() {
             DispatchQueue.global(qos: .userInitiated).async {
+                let start = ProcessInfo.processInfo.systemUptime
                 do {
                     // Update the request for Approov
                     let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request)
@@ -705,7 +716,7 @@ extension ApproovHTTPClient {
                     httpClientTask.futureResult.whenComplete { result in
                         switch result {
                         case .failure(let error):
-                            self.promise.fail(error)
+                            self.promise.fail(ApproovPinningVerifier.mapPinningFailure(error, host: updatedRequest.url.host, since: start))
                         case .success(let response):
                             self.promise.succeed(response)
                         }

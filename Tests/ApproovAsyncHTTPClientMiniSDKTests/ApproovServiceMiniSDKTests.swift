@@ -731,10 +731,12 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         try reinitializeServiceWithTargetHost(scenarioBody: """
             "pins": { "public-key-sha256": { "*": ["invalid-pin-base64="], "\(targetHost)": ["invalid-pin-base64="] } }
             """)
-        let pinnedClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
-        defer { try? pinnedClient.syncShutdown() }
-        // AsyncHTTPClient 1.10.2 reports the pin rejection as HTTPClientError.connectTimeout after 30 s.
-        XCTAssertThrowsError(try pinnedClient.execute(request: request).wait())
+        let client = pinnedClient()
+        defer { try? client.syncShutdown() }
+        // SPEC 2.3: the layer reports the pin rejection as URLError(.serverCertificateUntrusted).
+        XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
+            XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "\(error)")
+        }
     }
 
     // Trust evaluation date for the recorded certificates (2026-11-19T00:00:00Z).
@@ -847,6 +849,40 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             """)
         XCTAssertFalse(try ApproovPinningVerifier.verifyPinning(serverName: nil, certChain: [f.leaf, f.ca], verifyDate: pinningFixtureDate),
                        "an IP literal is pinned and the host is unknown, so the connection fails closed")
+    }
+
+    private func pinnedClient() -> ApproovHTTPClient {
+        ApproovHTTPClient(eventLoopGroupProvider: .createNew,
+                          configuration: HTTPClient.Configuration(timeout: .init(connect: .seconds(3))))
+    }
+
+    func testPinRejectionIsServerCertificateUntrustedOnBothAPIs() async throws {
+        let host = try XCTUnwrap(URL(string: targetURLString)?.host)
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "pins": { "public-key-sha256": { "*": ["invalid-pin-base64="], "\(host)": ["invalid-pin-base64="] } }
+            """)
+        let client = pinnedClient()
+        defer { try? client.syncShutdown() }
+        XCTAssertThrowsError(try client.execute(request: try HTTPClient.Request(url: targetURLString, method: .GET)).wait()) { error in
+            XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "HTTPClient.Request API: \(error)")
+        }
+        do {
+            _ = try await client.execute(HTTPClientRequest(url: targetURLString), timeout: .seconds(10))
+            XCTFail("expected a pinning failure")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "HTTPClientRequest API: \(error)")
+        }
+    }
+
+    // T37-12: cleartext is not blocked by pinning; the SDK answers BAD_URL and the mutator decides.
+    func testCleartextToAListedHostIsTheMutatorsDecision() throws {
+        try reinitializeServiceWithTargetHost()
+        let http = targetURLString.replacingOccurrences(of: "https://", with: "http://")
+        let closed = try decide(http, mutator: ApproovCloseFailureMutator.CLOSE_FAILURE)
+        guard case ApproovError.permanentError(let message)? = closed.error else { return XCTFail("\(String(describing: closed.error))") }
+        XCTAssertTrue(message.hasSuffix(": BAD_URL"), message)
+        let proceeds = try decide(http, mutator: ApproovAlwaysProceedMutator.ALWAYS_PROCEED)
+        XCTAssertEqual(proceeds.decision, .ShouldProceed)
     }
 
     func testPerRequestTLSWithoutFullVerificationIsRejected() throws {

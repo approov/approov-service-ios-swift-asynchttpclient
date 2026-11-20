@@ -19,6 +19,7 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import Approov
+import AsyncHTTPClient
 import CommonCrypto
 import Foundation
 import NIOConcurrencyHelpers
@@ -282,6 +283,26 @@ public class ApproovPinningVerifier {
         if firstTime {
             ApproovService.log(.warning, "ApproovService: \(host) has no pins and no Managed Trust Roots; its connections use OS trust only")
         }
+    }
+
+    /**
+     * Maps a request failure to the platform pinning error when the verifier rejected the request's host after
+     * the request started (SPEC 2.3). A cancellation is never mapped. The original error is the underlying error.
+     */
+    static func mapPinningFailure(_ error: Error, host: String?, since start: TimeInterval) -> Error {
+        if let clientError = error as? HTTPClientError, clientError == .cancelled {
+            return error
+        }
+        guard let host else {
+            return error
+        }
+        let rejected = stateLock.withLock { (rejections[ApproovService.normalisedHost(host)] ?? -1) >= start }
+        guard rejected else {
+            return error
+        }
+        return URLError(.serverCertificateUntrusted, userInfo: [
+            NSLocalizedDescriptionKey: "ApproovService: the connection to \(host) failed Approov pinning",
+            NSUnderlyingErrorKey: error as NSError])
     }
 
     /** Records that the verifier rejected a connection to a host, for the error mapping of Task 2. */
