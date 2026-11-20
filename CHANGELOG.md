@@ -7,15 +7,27 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [3.7.0] - Unreleased
 
 ### Added
+- `setLoggingLevel(_:)` sets the logging level. `OFF` silences the layer.
+- `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()`, `setTraceIDHeader(header:)` and `getTraceIDHeader()`, the header names that every 3.7.x layer uses.
+- `isApproovServiceEnabled()`, `isApproovProtectionEnabled()` and `setInstallAttributes(_:)`.
 - Completed full integration of Approov service layer v3 features: service mutator, bypass mode, trace ID, fallback token, secure string/query parameter substitutions, HTTP message signing (RFC 9421 signature builders and default request signers), and dynamic TLS pinning.
 - Added localized testing framework with a full 35-test suite utilizing the native Mini-SDK.
 - Excluded vendored message signing license files from the target build source to prevent SwiftPM warnings.
 
 ### Changed
+- `getLastARC()` returns the ARC of the last fetch the layer made and makes no fetch of its own.
+- **Breaking:** `getMessageSignature(message:)` returns `String?` and no longer throws. It returns the account signature, as `getAccountMessageSignature` does.
+- The token and the secure string log lines are written at DEBUG only, and log lines no longer carry a URL query, a fragment or a pin.
 - Refactored `ApproovService` to handle multi-threaded state access safely with locks.
 - Changed Package.swift to swift-tools-version 5.8 with support for structured headers, exact SDK dependencies, and conditional local Mini-SDK path setup.
 - `Package.swift` `releaseTAG` is now a `dev` placeholder, stamped with the release version by the `tag-release` CI job at tag time (was a hardcoded literal), keeping it in lock-step with the runtime user-property string.
 - Updated dynamic pinning to execute `Approov.getPins("public-key-sha256")` exactly once per handshake.
+
+### Deprecated
+- `loggingLevel`, `approovTokenHeaderAndPrefix`, `getApproovTokenHeader()`, `setApproovTraceIDHeader(header:)`, `getApproovTraceIDHeader()` and `getMessageSignature(message:)`.
+
+### Removed
+- **Breaking:** `prefetch()`, `proceedOnNetworkFail` and `setFailureCacheTTL(ttl:)`. The layer no longer caches token fetch failures. To proceed on a network failure, use a service mutator.
 
 ### Fixed
 - Pinning now matches pins only against the certificate path that trust evaluation built. A decoy certificate that the server appends no longer satisfies a pin, and a managed trust root pin (`*`) now matches when the server does not send its root. The URLSession layer pins the same path.
