@@ -129,6 +129,9 @@ public class ApproovService {
     /** The ARC of the most recent fetch the layer made, from the request path or a direct method (SPEC 5.3) */
     private static var _lastARC = ""
 
+    /** True once the deprecated getMessageSignature has logged its warning in this process */
+    private static var messageSignatureWarned = false
+
     /** Lock for the logging level and the test log sink */
     private static let logLock = NIOLock()
 
@@ -288,6 +291,16 @@ public class ApproovService {
         initLock.withLock {
             isApproovEnabledInternal
         }
+    }
+
+    /** True once any initialize has succeeded, bypass mode included: the layer processes requests (SPEC 5.7(c)) */
+    public static func isApproovServiceEnabled() -> Bool {
+        isInitialized()
+    }
+
+    /** True once the Approov SDK is initialized and Approov protection is active (SPEC 5.7(c)) */
+    public static func isApproovProtectionEnabled() -> Bool {
+        isApproovEnabled()
     }
 
     /**
@@ -910,6 +923,16 @@ public class ApproovService {
         log(.debug, "ApproovService: setInstallAttrsInToken")
     }
 
+    /** Sets the install attributes to include in the Approov token. The 3.7.x name of setInstallAttrsInToken. */
+    public static func setInstallAttributes(_ attrs: String) throws {
+        if !isApproovEnabled() {
+            logApproovUnavailable("setInstallAttributes")
+            throw ApproovError.permanentError(message: "setInstallAttributes: SDK not initialized")
+        }
+        Approov.setInstallAttrsInToken(attrs)
+        log(.debug, "ApproovService: setInstallAttributes")
+    }
+
     /**
      * Gets the account message signature.
      */
@@ -933,14 +956,19 @@ public class ApproovService {
     }
 
     /**
-     * Legacy getMessageSignature.
+     * Gets the account message signature. A deprecated alias of getAccountMessageSignature: it returns the
+     * same value and logs a deprecation warning the first time it is called in the process (SPEC 5.2).
      */
     @available(*, deprecated, message: "Use getAccountMessageSignature or getInstallMessageSignature instead.")
-    public static func getMessageSignature(message: String) throws -> String {
-        guard let signature = getAccountMessageSignature(message: message) else {
-            throw ApproovError.permanentError(message: "getMessageSignature: signature unavailable")
+    public static func getMessageSignature(message: String) -> String? {
+        let firstCall = stateLock.withLock { () -> Bool in
+            defer { messageSignatureWarned = true }
+            return !messageSignatureWarned
         }
-        return signature
+        if firstCall {
+            log(.warning, "ApproovService: getMessageSignature is deprecated, use getAccountMessageSignature")
+        }
+        return getAccountMessageSignature(message: message)
     }
 
     /**

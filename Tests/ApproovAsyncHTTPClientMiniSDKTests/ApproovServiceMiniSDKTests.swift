@@ -117,6 +117,41 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(ApproovService.isApproovEnabled())
     }
 
+    func testServiceAndProtectionFlags() throws {
+        ApproovService.resetForTesting()
+        XCTAssertFalse(ApproovService.isApproovServiceEnabled())
+        XCTAssertFalse(ApproovService.isApproovProtectionEnabled())
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertTrue(ApproovService.isApproovServiceEnabled(), "bypass mode is a service that processes requests")
+        XCTAssertFalse(ApproovService.isApproovProtectionEnabled(), "bypass mode has no protection")
+        try reinitializeServiceWithTargetHost()
+        XCTAssertTrue(ApproovService.isApproovServiceEnabled())
+        XCTAssertTrue(ApproovService.isApproovProtectionEnabled())
+    }
+
+    @available(*, deprecated)
+    func testGetMessageSignatureIsTheAccountSignatureAndWarnsOnce() throws {
+        try reinitializeServiceWithTargetHost()
+        _ = Approov.fetchTokenAndWait(targetURLString)
+        let lines = captureLogs(level: .warning) {
+            XCTAssertEqual(ApproovService.getMessageSignature(message: "m"), ApproovService.getAccountMessageSignature(message: "m"))
+            XCTAssertEqual(ApproovService.getMessageSignature(message: "m"), ApproovService.getAccountMessageSignature(message: "m"))
+        }
+        XCTAssertLessThanOrEqual(lines.filter { $0.1.contains("getMessageSignature is deprecated") }.count, 1,
+                                 "the deprecation warning is logged once per process")
+    }
+
+    func testSetInstallAttributesIsTheNewName() throws {
+        ApproovService.resetForTesting()
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertThrowsError(try ApproovService.setInstallAttributes("{}")) { error in
+            guard case let ApproovError.permanentError(message) = error else {
+                return XCTFail("Expected permanentError, got \(error)")
+            }
+            XCTAssertEqual(message, "setInstallAttributes: SDK not initialized")
+        }
+    }
+
     // MARK: - §2 Request Processing & Token Behaviors
 
     func testPrecheckTreatsUnknownKeyAsSuccess() throws {
