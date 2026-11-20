@@ -184,18 +184,18 @@ public extension ApproovServiceMutator {
         let status = approovResults.status
         switch status {
         case .rejected:
-            throw ApproovError.rejectionError(message: "precheck: rejected",
+            throw ApproovError.rejectionError(message: "precheck: REJECTED",
                                               ARC: approovResults.arc,
                                               rejectionReasons: approovResults.rejectionReasons)
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
-            throw ApproovError.networkingError(message: "precheck network error: " + Approov.string(from: status))
+            throw ApproovError.networkingError(message: "precheck network error: " + ApproovService.statusName(status))
         case .success,
              .unknownKey:
             return
         default:
-            throw ApproovError.permanentError(message: "precheck: " + Approov.string(from: status))
+            throw ApproovError.permanentError(message: "precheck: " + ApproovService.statusName(status))
         }
     }
 
@@ -207,9 +207,9 @@ public extension ApproovServiceMutator {
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
-            throw ApproovError.networkingError(message: "fetchToken network error: " + Approov.string(from: status))
+            throw ApproovError.networkingError(message: "fetchToken network error: " + ApproovService.statusName(status))
         default:
-            throw ApproovError.permanentError(message: "fetchToken: " + Approov.string(from: status))
+            throw ApproovError.permanentError(message: "fetchToken: " + ApproovService.statusName(status))
         }
     }
 
@@ -219,20 +219,20 @@ public extension ApproovServiceMutator {
         let status = approovResults.status
         switch status {
         case .rejected:
-            throw ApproovError.rejectionError(message: "fetchSecureString \(operation) for \(key): rejected",
+            throw ApproovError.rejectionError(message: "fetchSecureString \(operation) for \(key): REJECTED",
                                               ARC: approovResults.arc,
                                               rejectionReasons: approovResults.rejectionReasons)
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
             throw ApproovError.networkingError(message: "fetchSecureString \(operation) for \(key): " +
-                                               Approov.string(from: status))
+                                               ApproovService.statusName(status))
         case .success,
              .unknownKey:
             return
         default:
             throw ApproovError.permanentError(message: "fetchSecureString \(operation) for \(key): " +
-                                              Approov.string(from: status))
+                                              ApproovService.statusName(status))
         }
     }
 
@@ -240,17 +240,17 @@ public extension ApproovServiceMutator {
         let status = approovResults.status
         switch status {
         case .rejected:
-            throw ApproovError.rejectionError(message: "fetchCustomJWT: rejected",
+            throw ApproovError.rejectionError(message: "fetchCustomJWT: REJECTED",
                                               ARC: approovResults.arc,
                                               rejectionReasons: approovResults.rejectionReasons)
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
-            throw ApproovError.networkingError(message: "fetchCustomJWT network error: " + Approov.string(from: status))
+            throw ApproovError.networkingError(message: "fetchCustomJWT network error: " + ApproovService.statusName(status))
         case .success:
             return
         default:
-            throw ApproovError.permanentError(message: "fetchCustomJWT: " + Approov.string(from: status))
+            throw ApproovError.permanentError(message: "fetchCustomJWT: " + ApproovService.statusName(status))
         }
     }
 
@@ -275,14 +275,14 @@ public extension ApproovServiceMutator {
              .poorNetwork,
              .mitmDetected:
             throw ApproovError.networkingError(message: "Approov token fetch for \(url): " +
-                                               Approov.string(from: status))
+                                               ApproovService.statusName(status))
         case .noApproovService,
              .unknownURL,
              .unprotectedURL:
             return false
         default:
             throw ApproovError.permanentError(message: "Approov token fetch for \(url): " +
-                                              Approov.string(from: status))
+                                              ApproovService.statusName(status))
         }
     }
 
@@ -300,12 +300,12 @@ public extension ApproovServiceMutator {
              .poorNetwork,
              .mitmDetected:
             throw ApproovError.networkingError(message: "Header substitution for \(header): " +
-                                               Approov.string(from: status))
+                                               ApproovService.statusName(status))
         case .unknownKey:
             return false
         default:
             throw ApproovError.permanentError(message: "Header substitution for \(header): " +
-                                              Approov.string(from: status))
+                                              ApproovService.statusName(status))
         }
     }
 
@@ -323,12 +323,12 @@ public extension ApproovServiceMutator {
              .poorNetwork,
              .mitmDetected:
             throw ApproovError.networkingError(message: "Query parameter substitution for \(queryKey): " +
-                                               Approov.string(from: status))
+                                               ApproovService.statusName(status))
         case .unknownKey:
             return false
         default:
             throw ApproovError.permanentError(message: "Query parameter substitution for \(queryKey): " +
-                                              Approov.string(from: status))
+                                              ApproovService.statusName(status))
         }
     }
 

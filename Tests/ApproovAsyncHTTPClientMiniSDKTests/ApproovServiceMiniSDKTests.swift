@@ -353,7 +353,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.networkingError(message) = error else {
                 return XCTFail("Expected networkingError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchToken network error: no network")
+            XCTAssertEqual(message, "fetchToken network error: NO_NETWORK")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 
@@ -484,7 +484,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.networkingError(message) = error else {
                 return XCTFail("Expected networkingError, got \(error)")
             }
-            XCTAssertTrue(message.contains("no network"), "Unexpected message: \(message)")
+            XCTAssertTrue(message.contains("NO_NETWORK"), "Unexpected message: \(message)")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 
@@ -507,7 +507,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertTrue(message.contains("rejected"), "Unexpected message: \(message)")
+            XCTAssertTrue(message.contains("REJECTED"), "Unexpected message: \(message)")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 
@@ -587,6 +587,30 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             """)
         XCTAssertThrowsError(try ApproovService.fetchToken(url: targetURLString))
         XCTAssertEqual(ApproovService.getLastARC(), "TESTARC123")
+    }
+
+    func testStatusNamesAreTheSDKEnumNames() {
+        let expected: [(ApproovTokenFetchStatus, String)] = [
+            (.success, "SUCCESS"), (.noNetwork, "NO_NETWORK"), (.mitmDetected, "MITM_DETECTED"),
+            (.poorNetwork, "POOR_NETWORK"), (.noApproovService, "NO_APPROOV_SERVICE"), (.badURL, "BAD_URL"),
+            (.unknownURL, "UNKNOWN_URL"), (.unprotectedURL, "UNPROTECTED_URL"), (.notInitialized, "NOT_INITIALIZED"),
+            (.rejected, "REJECTED"), (.disabled, "DISABLED"), (.unknownKey, "UNKNOWN_KEY"), (.badKey, "BAD_KEY"),
+            (.badPayload, "BAD_PAYLOAD"), (.internalError, "INTERNAL_ERROR")
+        ]
+        for (status, name) in expected {
+            XCTAssertEqual(ApproovService.statusName(status), name)
+        }
+    }
+
+    func testDirectMethodMessagesUseStatusNames() throws {
+        try reinitializeServiceWithTargetHost()
+        setDirective(#"{ "operation": "fetchApproovToken", "response": { "status": "REJECTED" } }"#)
+        XCTAssertThrowsError(try ApproovService.fetchToken(url: targetURLString)) { error in
+            guard case let ApproovError.permanentError(message) = error else {
+                return XCTFail("Expected permanentError, got \(error)")
+            }
+            XCTAssertEqual(message, "fetchToken: REJECTED")
+        }
     }
 
     // MARK: - §3 Service Mutators & Decision Overrides
@@ -979,7 +1003,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertTrue(message.contains("bad key"), "Expected bad key message")
+            XCTAssertTrue(message.contains("BAD_KEY"), "Expected bad key message")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 
@@ -1023,7 +1047,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchCustomJWT: disabled")
+            XCTAssertEqual(message, "fetchCustomJWT: DISABLED")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 
@@ -1032,7 +1056,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchCustomJWT: bad payload")
+            XCTAssertEqual(message, "fetchCustomJWT: BAD_PAYLOAD")  // T37-36, SPEC 4.3: status names, not SDK prose
         }
     }
 

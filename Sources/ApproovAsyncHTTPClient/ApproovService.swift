@@ -1027,6 +1027,32 @@ public class ApproovService {
     }
 
     /**
+     * Gets the name of a fetch status as the Android SDK enum names it (SPEC 4.3). The iOS SDK gives only prose
+     * from Approov.string(from:), so the layer keeps this mirror. A status the mirror does not know keeps the
+     * SDK prose.
+     */
+    static func statusName(_ status: ApproovTokenFetchStatus) -> String {
+        switch status {
+        case .success: return "SUCCESS"
+        case .noNetwork: return "NO_NETWORK"
+        case .mitmDetected: return "MITM_DETECTED"
+        case .poorNetwork: return "POOR_NETWORK"
+        case .noApproovService: return "NO_APPROOV_SERVICE"
+        case .badURL: return "BAD_URL"
+        case .unknownURL: return "UNKNOWN_URL"
+        case .unprotectedURL: return "UNPROTECTED_URL"
+        case .notInitialized: return "NOT_INITIALIZED"
+        case .rejected: return "REJECTED"
+        case .disabled: return "DISABLED"
+        case .unknownKey: return "UNKNOWN_KEY"
+        case .badKey: return "BAD_KEY"
+        case .badPayload: return "BAD_PAYLOAD"
+        case .internalError: return "INTERNAL_ERROR"
+        @unknown default: return Approov.string(from: status)
+        }
+    }
+
+    /**
      * Records the ARC of a fetch result as the most recent one. An empty ARC clears the earlier value,
      * because the ARC belongs to the last fetch.
      */
