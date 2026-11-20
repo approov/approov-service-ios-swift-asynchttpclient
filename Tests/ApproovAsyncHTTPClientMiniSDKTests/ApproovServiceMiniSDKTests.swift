@@ -461,15 +461,25 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §4 Pinning Configuration & Scenarios
 
-    func testPinningAcceptAny() throws {
+    func testPinningFailsClosedWhenPinsAreUnavailable() throws {
         try reinitializeServiceWithTargetHost()
+        let host = "replay.ivol.workers.dev"
+        let chain = [try fixtureCertificate(PinningTestCertificates.replayLeaf),
+                     try fixtureCertificate(PinningTestCertificates.replayWE1),
+                     try fixtureCertificate(PinningTestCertificates.replayGTSR4)]
+        XCTAssertNoThrow(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: chain,
+                                                                  verifyDate: pinningFixtureDate),
+                         "control: with pins available the chain is checked without an error")
 
-        MiniSDKAttesterProxyController.setNextPinningDirectiveJSON("{\"operation\": \"getPins\", \"acceptAny\": true}")
-
-        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
-        let reply = fetchNetworkReply(for: request)
-
-        XCTAssertNotNil(reply, "Expected the request to succeed when acceptAny is used")
+        // SPEC 2.4: a layer that cannot read the pins fails the connection closed.
+        MiniSDKAttesterProxyController.setPinsUnavailable(true)
+        defer { MiniSDKAttesterProxyController.setPinsUnavailable(false) }
+        XCTAssertThrowsError(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: chain,
+                                                                      verifyDate: pinningFixtureDate)) { error in
+            guard case ApproovError.pinningError = error else {
+                return XCTFail("Expected ApproovError.pinningError, got \(error)")
+            }
+        }
     }
 
     func testPinningFailureTriggersPinningError() throws {
