@@ -35,6 +35,9 @@ public class ApproovHTTPClient {
 
     let httpClientDelegate: HTTPClient
 
+    /// Why Approov pinning cannot run on this client, or nil when it can (D5).
+    let pinningUnavailableReason: String?
+
     internal static let loggingDisabled = Logger(label: "ApproovHTTPClient-do-not-log",
         factory: { _ in SwiftLogNoOpLogHandler() })
 
@@ -61,6 +64,31 @@ public class ApproovHTTPClient {
         httpClientDelegate = HTTPClient(eventLoopGroupProvider: eventLoopGroupProvider,
                    configuration: configuration,
                    backgroundActivityLogger: backgroundActivityLogger)
+        // AsyncHTTPClient runs the Approov pin check only on the Network.framework path, which needs a
+        // NIOTSEventLoopGroup, and only when TLS verification is full.
+        var reason: String? = nil
+        if case .shared(let group) = eventLoopGroupProvider, !ApproovHTTPClient.usesNetworkFramework(group) {
+            reason = "ApproovHTTPClient needs a NIOTSEventLoopGroup: Approov pinning does not run on \(type(of: group))"
+        } else if let tls = configuration.tlsConfiguration, tls.certificateVerification != .fullVerification {
+            reason = "ApproovHTTPClient TLS configuration: certificateVerification must be .fullVerification, because Approov pinning does not run otherwise"
+        }
+        pinningUnavailableReason = reason
+    }
+
+    /// Whether AsyncHTTPClient connects on the Network.framework path for a group or an event loop. It is the
+    /// same check that AsyncHTTPClient makes when it selects the connection bootstrap.
+    static func usesNetworkFramework(_ group: EventLoopGroup) -> Bool {
+        if #available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *) {
+            return NIOTSConnectionBootstrap(validatingGroup: group) != nil
+        }
+        return false
+    }
+
+    /// Fails a request when Approov protection is on and pinning cannot run on this client (D5, SPEC 1.7(a)).
+    static func checkPinningAvailable(_ reason: String?) throws {
+        if let reason, ApproovService.isApproovEnabled() {
+            throw ApproovRequestPathError.configuration(reason)
+        }
     }
 
     /// Shuts down the client and `EventLoopGroup` if it was created by the client.
@@ -419,13 +447,21 @@ public class ApproovHTTPClient {
         deadline: NIODeadline? = nil,
         logger originalLogger: Logger?
     ) -> ApproovHTTPClient.Task<Delegate, Delegate.Response> {
+        let preference = EventLoopPreference(eventLoopPreference)
+        var reason = pinningUnavailableReason
+        if reason == nil, case .delegateAndChannel(on: let eventLoop) = preference.preference,
+           !ApproovHTTPClient.usesNetworkFramework(eventLoop) {
+            // A channel event loop that is not a NIOTSEventLoop forces the NIOSSL path, where pinning does not run.
+            reason = "ApproovHTTPClient: delegateAndChannel needs a NIOTSEventLoop for Approov pinning"
+        }
         let task = ApproovHTTPClient.Task<Delegate, Delegate.Response>(
             httpClientDelegate: httpClientDelegate,
             request: request,
             delegate: delegate,
-            eventLoopPreference: EventLoopPreference(eventLoopPreference),
+            eventLoopPreference: preference,
             deadline: deadline,
-            logger: originalLogger ?? ApproovHTTPClient.loggingDisabled)
+            logger: originalLogger ?? ApproovHTTPClient.loggingDisabled,
+            pinningUnavailableReason: reason)
         task.runInBackground()
         return task
     }
@@ -437,7 +473,7 @@ public class ApproovHTTPClient {
         if let tlsConfiguration = request.tlsConfiguration,
            tlsConfiguration.certificateVerification != .fullVerification,
            ApproovService.isApproovEnabled() {
-            throw ApproovError.configurationError(message:
+            throw ApproovRequestPathError.configuration(
                 "Request TLS configuration for \(request.url.host ?? ""): certificateVerification must be "
                 + ".fullVerification, because Approov pinning does not run otherwise")
         }
@@ -486,6 +522,7 @@ extension ApproovHTTPClient {
         deadline: NIODeadline,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
+        try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
         let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
             try ApproovHTTPClient.approovUpdateRequest(request: request)
@@ -509,6 +546,7 @@ extension ApproovHTTPClient {
         timeout: TimeAmount,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
+        try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
         let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
             try ApproovHTTPClient.approovUpdateRequest(request: request)
@@ -639,6 +677,9 @@ extension ApproovHTTPClient {
         // Promise that completes when the wrapped HTTPClient.Task's promise completes
         let promise: EventLoopPromise<Delegate.Response>
 
+        // Why Approov pinning cannot run for this request, or nil when it can
+        let pinningUnavailableReason: String?
+
         // Wrapped HTTPClient.Task
         private var _httpClientTask: HTTPClient.Task<Delegate.Response>?
 
@@ -648,7 +689,9 @@ extension ApproovHTTPClient {
              delegate: Delegate,
              eventLoopPreference: ApproovHTTPClient.EventLoopPreference,
              deadline: NIODeadline? = nil,
-             logger: Logger) {
+             logger: Logger,
+             pinningUnavailableReason: String? = nil) {
+            self.pinningUnavailableReason = pinningUnavailableReason
             self.httpClient = httpClientDelegate
             self.request = request
             self.delegate = delegate
@@ -684,6 +727,7 @@ extension ApproovHTTPClient {
             DispatchQueue.global(qos: .userInitiated).async {
                 let start = ProcessInfo.processInfo.systemUptime
                 do {
+                    try ApproovHTTPClient.checkPinningAvailable(self.pinningUnavailableReason)
                     // Update the request for Approov
                     let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request)
                     if self.isCancelled {
@@ -807,14 +851,15 @@ extension ApproovHTTPClient {
             for child in mirror.children {
                 if child.label == "preference" {
                     let prefMirror = Mirror(reflecting: child.value)
-                    if prefMirror.displayStyle == .enum, let caseLabel = prefMirror.children.first?.label {
+                    if prefMirror.displayStyle == .enum, let payload = prefMirror.children.first,
+                       let caseLabel = payload.label {
                         if caseLabel == "indifferent" {
                             self.preference = .indifferent
                             return
-                        } else if caseLabel == "delegate", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                        } else if caseLabel == "delegate", let eventLoop = Self.eventLoop(in: payload.value) {
                             self.preference = .delegate(on: eventLoop)
                             return
-                        } else if caseLabel == "delegateAndChannel", let eventLoop = prefMirror.children.first?.value as? EventLoop {
+                        } else if caseLabel == "delegateAndChannel", let eventLoop = Self.eventLoop(in: payload.value) {
                             self.preference = .delegateAndChannel(on: eventLoop)
                             return
                         }
@@ -825,6 +870,15 @@ extension ApproovHTTPClient {
             // cannot map the preference and fall back to .indifferent. This is a known limitation of
             // bridging the wrapped client's EventLoopPreference.
             self.preference = .indifferent
+        }
+
+        /// Gets the event loop from an enum payload. A case with a labeled value, such as
+        /// `delegateAndChannel(on:)`, reflects its payload as the one-element tuple `(on: EventLoop)`.
+        private static func eventLoop(in payload: Any) -> EventLoop? {
+            if let eventLoop = payload as? EventLoop {
+                return eventLoop
+            }
+            return Mirror(reflecting: payload).children.first?.value as? EventLoop
         }
 
         /// Event Loop will be selected by the library.

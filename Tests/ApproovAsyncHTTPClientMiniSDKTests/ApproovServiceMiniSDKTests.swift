@@ -856,21 +856,25 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                           configuration: HTTPClient.Configuration(timeout: .init(connect: .seconds(3))))
     }
 
-    func testPinRejectionIsServerCertificateUntrustedOnBothAPIs() async throws {
+    func testPinRejectionIsServerCertificateUntrustedOnBothAPIs() throws {
         let host = try XCTUnwrap(URL(string: targetURLString)?.host)
         try reinitializeServiceWithTargetHost(scenarioBody: """
             "pins": { "public-key-sha256": { "*": ["invalid-pin-base64="], "\(host)": ["invalid-pin-base64="] } }
             """)
+        let url = targetURLString
         let client = pinnedClient()
         defer { try? client.syncShutdown() }
-        XCTAssertThrowsError(try client.execute(request: try HTTPClient.Request(url: targetURLString, method: .GET)).wait()) { error in
-            XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "HTTPClient.Request API: \(error)")
-        }
-        do {
-            _ = try await client.execute(HTTPClientRequest(url: targetURLString), timeout: .seconds(10))
-            XCTFail("expected a pinning failure")
-        } catch {
-            XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "HTTPClientRequest API: \(error)")
+        let results: [(String, Result<Void, Error>)] = [
+            ("HTTPClient.Request API", Result { _ = try client.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait() }),
+            ("HTTPClientRequest API", blockingResult { _ = try await client.execute(HTTPClientRequest(url: url), timeout: .seconds(10)) })
+        ]
+        for (api, result) in results {
+            switch result {
+            case .success:
+                XCTFail("\(api): expected a pinning failure")
+            case .failure(let error):
+                XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "\(api): \(error)")
+            }
         }
     }
 
@@ -885,6 +889,87 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(proceeds.decision, .ShouldProceed)
     }
 
+    /// Runs async work from a synchronous test and returns its result, so that every assertion runs on the
+    /// test thread. An async test that mixes blocking `wait()` calls with `await` lost recorded failures.
+    private func blockingResult<T>(_ work: @escaping () async throws -> T) -> Result<T, Error> {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<T, Error>?
+        Task.detached {
+            do {
+                result = .success(try await work())
+            } catch {
+                result = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result!
+    }
+
+    private func assertPinningUnavailable<T>(_ result: Result<T, Error>, _ message: String) {
+        switch result {
+        case .success:
+            XCTFail("\(message): expected URLError(.unknown), but the request succeeded")
+        case .failure(let error):
+            XCTAssertEqual((error as? URLError)?.code, .unknown, "\(message): \(error)")
+        }
+    }
+
+    func testClientsWherePinningCannotRunAreRefused() throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let posixClient = ApproovHTTPClient(eventLoopGroupProvider: .shared(group))
+        defer { try? posixClient.syncShutdown() }
+        assertPinningUnavailable(Result { try posixClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait() },
+                                 "NIOSSL group, HTTPClient.Request API")
+        assertPinningUnavailable(blockingResult { try await posixClient.execute(HTTPClientRequest(url: url), timeout: .seconds(10)) },
+                                 "NIOSSL group, HTTPClientRequest API")
+
+        var tls = TLSConfiguration.makeClientConfiguration()
+        tls.certificateVerification = .none
+        let noVerifyClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew,
+                                               configuration: HTTPClient.Configuration(tlsConfiguration: tls))
+        defer { try? noVerifyClient.syncShutdown() }
+        assertPinningUnavailable(Result { try noVerifyClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait() },
+                                 "client TLS without full verification")
+
+        // A NIOTS client, but a channel event loop from a POSIX group, forces the NIOSSL path.
+        let tsClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? tsClient.syncShutdown() }
+        assertPinningUnavailable(Result {
+            let request = try HTTPClient.Request(url: url, method: .GET)
+            _ = try tsClient.execute(request: request, delegate: ResponseAccumulator(request: request),
+                                     eventLoop: .delegateAndChannel(on: group.next()), logger: nil).wait()
+        }, "delegateAndChannel on a POSIX event loop")
+        XCTAssertNoThrow(try tsClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait(),
+                         "control: the same client with no event loop preference")
+
+        // Bypass mode has no pins, so the same clients work.
+        ApproovService.resetForTesting()
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertNoThrow(try posixClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait())
+    }
+
+    func testEventLoopPreferenceKeepsTheEventLoop() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let loop = group.next()
+        func mappedLoop(_ preference: HTTPClient.EventLoopPreference) -> EventLoop? {
+            switch ApproovHTTPClient.EventLoopPreference(preference).preference {
+            case .indifferent: return nil
+            case .delegate(on: let mapped): return mapped
+            case .delegateAndChannel(on: let mapped): return mapped
+            }
+        }
+        XCTAssertNil(mappedLoop(.indifferent))
+        XCTAssertTrue(mappedLoop(.delegate(on: loop)) === loop, "delegate(on:)")
+        XCTAssertTrue(mappedLoop(.delegateAndChannel(on: loop)) === loop, "delegateAndChannel(on:)")
+        XCTAssertEqual(ApproovHTTPClient.EventLoopPreference(HTTPClient.EventLoopPreference.delegateAndChannel(on: loop)).preference,
+                       ApproovHTTPClient.EventLoopPreference.Preference.delegateAndChannel(on: loop))
+    }
+
     func testPerRequestTLSWithoutFullVerificationIsRejected() throws {
         try reinitializeServiceWithTargetHost()
         var tls = TLSConfiguration.makeClientConfiguration()
@@ -894,10 +979,9 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
         defer { try? client.syncShutdown() }
 
+        // SPEC 1.7(a): a configuration error on the request path is the network error, URLError(.unknown).
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
-            guard case ApproovError.configurationError = error else {
-                return XCTFail("Expected ApproovError.configurationError, got \(error)")
-            }
+            XCTAssertEqual((error as? URLError)?.code, .unknown, "\(error)")
         }
     }
 
