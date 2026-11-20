@@ -1377,16 +1377,24 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             try? client.syncShutdown()
         }
         var receivedData: Data?
+        var status: HTTPResponseStatus?
         do {
             let response = try client.execute(request: request).wait()
+            status = response.status
             if let body = response.body {
-                receivedData = body.getData(at: 0, length: body.readableBytes)
+                receivedData = body.getData(at: body.readerIndex, length: body.readableBytes)
             }
         } catch {
             print("Request failed with error: \(error)")
         }
         guard let data = receivedData,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // A reply that is not the echo worker's JSON: record what came back, so that a failure in CI can
+            // be told apart from a fault in the layer.
+            if let status {
+                let snippet = String(decoding: (receivedData ?? Data()).prefix(200), as: UTF8.self)
+                print("Echo reply is not JSON: \(request.method) \(request.url.absoluteString) -> HTTP \(status.code): \(snippet)")
+            }
             return nil
         }
         return obj
@@ -1398,16 +1406,24 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             try? client.syncShutdown()
         }
         var receivedData: Data?
+        var status: HTTPResponseStatus?
         do {
             let response = try client.execute(request: request).wait()
+            status = response.status
             if let body = response.body {
-                receivedData = body.getData(at: 0, length: body.readableBytes)
+                receivedData = body.getData(at: body.readerIndex, length: body.readableBytes)
             }
         } catch {
             print("Request failed with error: \(error)")
         }
         guard let data = receivedData,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // A reply that is not the echo worker's JSON: record what came back, so that a failure in CI can
+            // be told apart from a fault in the layer.
+            if let status {
+                let snippet = String(decoding: (receivedData ?? Data()).prefix(200), as: UTF8.self)
+                print("Echo reply is not JSON: \(request.method) \(request.url.absoluteString) -> HTTP \(status.code): \(snippet)")
+            }
             return nil
         }
         return obj
