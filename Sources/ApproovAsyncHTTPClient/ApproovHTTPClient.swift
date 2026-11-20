@@ -467,7 +467,7 @@ public class ApproovHTTPClient {
     }
 
     /// Update a request for Approov
-    private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
+    static func approovUpdateRequest(request: HTTPClient.Request, mutator: ApproovServiceMutator, substituteQuery: Bool) throws -> HTTPClient.Request {
         // In the Approov AsyncHTTPClient fork, a TLS configuration without full verification completes the
         // handshake without the Approov pin check. Reject it, so that one request option cannot disable pinning.
         if let tlsConfiguration = request.tlsConfiguration,
@@ -486,7 +486,7 @@ public class ApproovHTTPClient {
             body: bodyData
         )
         
-        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
         if let error = response.error {
             throw error
         }
@@ -525,7 +525,7 @@ extension ApproovHTTPClient {
         try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
         let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
-            try ApproovHTTPClient.approovUpdateRequest(request: request)
+            try ApproovHTTPClient.approovUpdateRequest(request: request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
         }
         do {
             return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
@@ -549,7 +549,7 @@ extension ApproovHTTPClient {
         try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
         let start = ProcessInfo.processInfo.systemUptime
         let updatedRequest = try await ApproovHTTPClient.runOffCooperativePool {
-            try ApproovHTTPClient.approovUpdateRequest(request: request)
+            try ApproovHTTPClient.approovUpdateRequest(request: request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
         }
         do {
             return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
@@ -569,7 +569,7 @@ extension ApproovHTTPClient {
     }
 
     /// Update a request for Approov
-    private static func approovUpdateRequest(request: HTTPClientRequest) throws -> HTTPClientRequest {
+    static func approovUpdateRequest(request: HTTPClientRequest, mutator: ApproovServiceMutator, substituteQuery: Bool) throws -> HTTPClientRequest {
         guard let url = URL(string: request.url) else {
             throw HTTPClientError.invalidURL
         }
@@ -581,7 +581,7 @@ extension ApproovHTTPClient {
             body: extractBodyData(from: request.body)
         )
         
-        let response = ApproovService.updateRequestWithApproov(request: approovReq)
+        let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
         if let error = response.error {
             throw error
         }
@@ -729,7 +729,7 @@ extension ApproovHTTPClient {
                 do {
                     try ApproovHTTPClient.checkPinningAvailable(self.pinningUnavailableReason)
                     // Update the request for Approov
-                    let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request)
+                    let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
                     if self.isCancelled {
                         self.promise.fail(HTTPClientError.cancelled)
                         return

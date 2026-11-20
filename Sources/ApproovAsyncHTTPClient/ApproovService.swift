@@ -272,6 +272,7 @@ public class ApproovService {
             _useApproovStatusIfNoToken = false
             _lastARC = ""
         }
+        ApproovProtectionLedger.shared.resetForTesting()
     }
 
     /**
@@ -577,6 +578,27 @@ public class ApproovService {
      * Adds Approov protection to a request, as the service mutator decides (SPEC 1, 6).
      */
     public static func updateRequestWithApproov(request: ApproovRequest) -> ApproovUpdateResponse {
+        return updateRequestWithApproov(request: request, mutator: getServiceMutator(), substituteQuery: true)
+    }
+
+    /**
+     * Adds Approov protection as the public form does. `mutator` is the one that the request started with, which
+     * decides every hop (SPEC 6.5). `substituteQuery` is false for a redirect hop whose URL is the server's
+     * `Location`: the layer never looks up the query values that the server sent (SPEC 7.3, T37-13a). A request
+     * that the layer already protected is first put back as the app wrote it (T37-38).
+     */
+    static func updateRequestWithApproov(request: ApproovRequest, mutator: ApproovServiceMutator,
+                                         substituteQuery: Bool) -> ApproovUpdateResponse {
+        let appRequest = ApproovProtectionLedger.shared.restore(request)
+        let response = protect(appRequest, mutator: mutator, substituteQuery: substituteQuery)
+        if response.decision == .ShouldProceed {
+            ApproovProtectionLedger.shared.record(original: appRequest, protected: response.request)
+        }
+        return response
+    }
+
+    private static func protect(_ request: ApproovRequest, mutator: ApproovServiceMutator,
+                                substituteQuery: Bool) -> ApproovUpdateResponse {
         let url = request.url
         let changes = ApproovRequestMutations()
 
@@ -585,8 +607,6 @@ public class ApproovService {
             return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
         }
 
-        // One request, one mutator (SPEC 6.5): it is read once and used for every hook of this request.
-        let mutator = getServiceMutator()
         do {
             if try !ApproovRequestPathError.callHook("handleInterceptorShouldProcessRequest", {
                 try mutator.handleInterceptorShouldProcessRequest(request)
@@ -696,7 +716,9 @@ public class ApproovService {
         if isProtectedChannel {
             do {
                 try substituteHeaders(&response.request, mutator: mutator, changes: changes)
-                try substituteQueryParams(&response.request, mutator: mutator, changes: changes)
+                if substituteQuery {
+                    try substituteQueryParams(&response.request, mutator: mutator, changes: changes)
+                }
             } catch {
                 applyMutatorError(error, response: &response)
                 return response

@@ -1110,6 +1110,50 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(ApproovRedirects.canBeSentAgain(.stream(AsyncStream<ByteBuffer> { $0.finish() }, length: .known(0))))
     }
 
+    // T37-38: a request that the layer already protected is put back as the app wrote it before it is protected
+    // again. No secure string is fetched with a secret as its key, and it carries one token and one signature.
+    func testProtectedRequestIsProtectedAgainFromThePlaceholders() throws {
+        try secureStringScenario()
+        let first = try decide(targetURLString + "/p?k=query-key", mutator: signer(),
+                               headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+        XCTAssertEqual(first.request.headers.first(name: "Api-Key"), "Bearer header-secret")
+        XCTAssertTrue(first.request.url.absoluteString.hasSuffix("k=query-secret"), first.request.url.absoluteString)
+        MiniSDKAttesterProxyController.clearCallLog()
+        let again = ApproovService.updateRequestWithApproov(request: first.request)
+        XCTAssertEqual(again.decision, .ShouldProceed)
+        XCTAssertEqual(again.request.headers.first(name: "Api-Key"), "Bearer header-secret")
+        XCTAssertEqual(again.request.url, first.request.url)
+        for name in ["Approov-Token", "Signature", "Signature-Input"] {
+            XCTAssertEqual(again.request.headers[name].count, 1, name)
+        }
+        let calls = MiniSDKAttesterProxyController.callLog()
+        XCTAssertTrue(calls.contains("fetchSecureStringAndWait:header-key"), "\(calls)")
+        XCTAssertTrue(calls.contains("fetchSecureStringAndWait:query-key"), "\(calls)")
+        XCTAssertFalse(calls.contains { $0.hasPrefix("fetchSecureStringAndWait:") && $0.contains("secret") },
+                       "a secret is never a key: \(calls)")
+    }
+
+    // T37-38: signRequest output sent through ApproovHTTPClient is protected once, from the app's placeholders.
+    func testSignRequestOutputThroughApproovHTTPClientIsProtectedOnce() throws {
+        try secureStringScenario()
+        ApproovService.setServiceMutator(signer())
+        let request = try HTTPClient.Request(url: targetURLString + "/p?k=query-key", method: .GET,
+                                             headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
+        let signed = try ApproovService.signRequest(request)
+        MiniSDKAttesterProxyController.clearCallLog()
+        let reply = try XCTUnwrap(fetchNetworkReply(for: signed))
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-secret")
+        let url = try XCTUnwrap(reply["url"] as? String)
+        XCTAssertTrue(url.hasSuffix("k=query-secret"), url)
+        let token = try XCTUnwrap(getHeader(from: reply, key: "Approov-Token"))
+        XCTAssertFalse(token.contains(","), "one token header: \(token)")
+        let signature = try XCTUnwrap(getHeader(from: reply, key: "Signature"))
+        XCTAssertFalse(signature.contains(", "), "one signature: \(signature)")
+        XCTAssertFalse(MiniSDKAttesterProxyController.callLog().contains {
+            $0.hasPrefix("fetchSecureStringAndWait:") && $0.contains("secret")
+        })
+    }
+
     // MARK: - §5 Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
