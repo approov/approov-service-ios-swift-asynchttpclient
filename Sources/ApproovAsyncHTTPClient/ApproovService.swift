@@ -124,7 +124,7 @@ public class ApproovService {
     private static var _useApproovStatusIfNoToken = false
 
     /** The mutator instance used to control ApproovService behavior at key points in the flow. */
-    private static var _serviceMutator: ApproovServiceMutator = ApproovServiceMutatorDefault.shared
+    private static var _serviceMutator: ApproovServiceMutator = ApproovCloseFailureMutator.instance
 
     /** The ARC of the most recent fetch the layer made, from the request path or a direct method (SPEC 5.3) */
     private static var _lastARC = ""
@@ -233,7 +233,7 @@ public class ApproovService {
                 _approovTokenHeader = "Approov-Token"
                 _approovTokenPrefix = ""
                 _approovTraceIDHeader = "Approov-TraceID"
-                _serviceMutator = ApproovServiceMutatorDefault.shared
+                _serviceMutator = ApproovCloseFailureMutator.instance
                 substitutionHeaders = Dictionary()
                 substitutionQueryParams = Set()
                 exclusionURLRegexs = Dictionary()
@@ -262,7 +262,7 @@ public class ApproovService {
             _approovTokenHeader = "Approov-Token"
             _approovTokenPrefix = ""
             _approovTraceIDHeader = "Approov-TraceID"
-            _serviceMutator = ApproovServiceMutatorDefault.shared
+            _serviceMutator = ApproovCloseFailureMutator.instance
             substitutionHeaders = Dictionary()
             substitutionQueryParams = Set()
             exclusionURLRegexs = Dictionary()
@@ -409,7 +409,7 @@ public class ApproovService {
 
     public static func setServiceMutator(_ mutator: ApproovServiceMutator?) {
         stateLock.withLock {
-            _serviceMutator = mutator ?? ApproovServiceMutatorDefault.shared
+            _serviceMutator = mutator ?? ApproovCloseFailureMutator.instance
         }
     }
 

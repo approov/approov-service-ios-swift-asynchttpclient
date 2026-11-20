@@ -144,7 +144,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertTrue(ApproovService.getSubstitutionHeaders().isEmpty)
         XCTAssertTrue(ApproovService.getSubstitutionQueryParams().isEmpty)
         XCTAssertTrue(ApproovService.getExclusionURLRegexs().isEmpty)
-        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovServiceMutatorDefault)
+        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovCloseFailureMutator)
         XCTAssertEqual(ApproovService.getLastARC(), "")
         XCTAssertEqual(ApproovService.logLevel, .warning, "initialize keeps the logging level (SPEC 5.10)")
         ApproovService.setLoggingLevel(.off)
@@ -304,7 +304,9 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    func testUpdateRequestNoApproovServiceProceedsWithoutToken() throws {
+    // SPEC 6.2 (3.7.0): NO_APPROOV_SERVICE proceeds to a listed host with an empty token header and the SDK
+    // trace header, as evidence that Approov processing ran. Under 3.5.x it carried no Approov header.
+    func testUpdateRequestNoApproovServiceProceedsWithEmptyToken() throws {
         try reinitializeServiceWithTargetHost()
         setDirective(
             """
@@ -320,9 +322,9 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let request = try HTTPClient.Request(url: targetURLString, method: .GET)
         let reply = fetchNetworkReply(for: request)
 
-        XCTAssertNotNil(reply, "Expected to receive a reply from worker when proceeding without token")
-        XCTAssertNil(getHeader(from: reply, key: "Approov-Token"))
-        XCTAssertNil(getHeader(from: reply, key: "Approov-TraceID"))
+        XCTAssertNotNil(reply, "Expected to receive a reply from worker when proceeding without a token")
+        XCTAssertEqual(getHeader(from: reply, key: "Approov-Token"), "", "the token header is present and empty")
+        XCTAssertNotNil(getHeader(from: reply, key: "Approov-TraceID"), "the trace header the SDK supplied")
     }
 
     func testUpdateRequestCanIgnoreExcludedURL() throws {
@@ -640,6 +642,25 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     }
 
     // MARK: - §3 Service Mutators & Decision Overrides
+
+    func testDefaultMutatorIsCloseFailure() throws {
+        try reinitializeServiceWithTargetHost()
+        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovCloseFailureMutator)
+        ApproovService.setServiceMutator(ApproovAlwaysProceedMutator.ALWAYS_PROCEED)
+        ApproovService.setServiceMutator(nil)
+        XCTAssertTrue(ApproovService.getServiceMutator() is ApproovCloseFailureMutator, "nil restores DEFAULT")
+        XCTAssertTrue(ApproovCloseFailureMutator.DEFAULT is ApproovCloseFailureMutator, "DEFAULT is CLOSE_FAILURE in 3.7.0")
+    }
+
+    func testAlwaysProceedNeverThrowsATokenDecision() throws {
+        let fetch = ApproovAlwaysProceedMutator.ALWAYS_PROCEED
+        try reinitializeServiceWithTargetHost()
+        for status in ["NO_NETWORK", "MITM_DETECTED", "REJECTED", "INTERNAL_ERROR", "NO_APPROOV_SERVICE"] {
+            setDirective(#"{ "operation": "fetchApproovToken", "response": { "status": "\#(status)" } }"#)
+            let result = Approov.fetchTokenAndWait(targetURLString)
+            XCTAssertTrue(try fetch.handleInterceptorFetchTokenResult(result, url: targetURLString), status)
+        }
+    }
 
     struct AlwaysProceedMutator: ApproovServiceMutator {
         func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {

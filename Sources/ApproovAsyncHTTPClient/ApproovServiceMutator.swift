@@ -269,68 +269,37 @@ public extension ApproovServiceMutator {
                                            url: String) throws -> Bool {
         let status = approovResults.status
         switch status {
-        case .success:
+        case .success,
+             .noApproovService:
             return true
+        case .unknownURL,
+             .unprotectedURL:
+            return false
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
-            throw ApproovError.networkingError(message: "Approov token fetch for \(url): " +
-                                               ApproovService.statusName(status))
-        case .noApproovService,
-             .unknownURL,
-             .unprotectedURL:
-            return false
+            // SPEC 4.2: with the status in the token header, network failures proceed, as in 3.5.8
+            if ApproovService.getUseApproovStatusIfNoToken() {
+                return true
+            }
+            throw ApproovStandardDecisions.made(.networkingError(message: "Approov token fetch for \(url): " +
+                                                                 ApproovService.statusName(status)))
         default:
-            throw ApproovError.permanentError(message: "Approov token fetch for \(url): " +
-                                              ApproovService.statusName(status))
+            throw ApproovStandardDecisions.made(.permanentError(message: "Approov token fetch for \(url): " +
+                                                                ApproovService.statusName(status)))
         }
     }
 
     func handleInterceptorHeaderSubstitutionResult(_ approovResults: ApproovTokenFetchResult,
                                                    header: String) throws -> Bool {
-        let status = approovResults.status
-        switch status {
-        case .success:
-            return true
-        case .rejected:
-            throw ApproovError.rejectionError(message: "Header substitution for \(header): rejected",
-                                              ARC: approovResults.arc,
-                                              rejectionReasons: approovResults.rejectionReasons)
-        case .noNetwork,
-             .poorNetwork,
-             .mitmDetected:
-            throw ApproovError.networkingError(message: "Header substitution for \(header): " +
-                                               ApproovService.statusName(status))
-        case .unknownKey:
-            return false
-        default:
-            throw ApproovError.permanentError(message: "Header substitution for \(header): " +
-                                              ApproovService.statusName(status))
-        }
+        return standardSubstitution(approovResults)
     }
 
     func handleInterceptorQueryParamSubstitutionResult(_ approovResults: ApproovTokenFetchResult,
                                                        queryKey: String) throws -> Bool {
-        let status = approovResults.status
-        switch status {
-        case .success:
-            return true
-        case .rejected:
-            throw ApproovError.rejectionError(message: "Query parameter substitution for \(queryKey): rejected",
-                                              ARC: approovResults.arc,
-                                              rejectionReasons: approovResults.rejectionReasons)
-        case .noNetwork,
-             .poorNetwork,
-             .mitmDetected:
-            throw ApproovError.networkingError(message: "Query parameter substitution for \(queryKey): " +
-                                               ApproovService.statusName(status))
-        case .unknownKey:
-            return false
-        default:
-            throw ApproovError.permanentError(message: "Query parameter substitution for \(queryKey): " +
-                                              ApproovService.statusName(status))
-        }
+        return standardSubstitution(approovResults)
     }
+
 
     func handleInterceptorProcessedRequest(_ request: ApproovRequest,
                                            changes: ApproovRequestMutations) throws -> ApproovRequest {
@@ -342,12 +311,49 @@ public extension ApproovServiceMutator {
     }
 }
 
+// A standard mutator never aborts a request because of a secure string (SPEC 6.2): SUCCESS substitutes, and the
+// layer writes any other status into the placeholder.
+private func standardSubstitution(_ approovResults: ApproovTokenFetchResult) -> Bool {
+    return approovResults.status == .success
+}
+
+/// The 3.5.x token decisions (SPEC 6.2). The default mutator in 3.7.0.
+public final class ApproovCloseFailureMutator: ApproovServiceMutator, CustomStringConvertible {
+    static let instance = ApproovCloseFailureMutator()
+    private init() {}
+    public var description: String { "ApproovServiceMutator.CLOSE_FAILURE" }
+}
+
+/// Never aborts a request: every failure status proceeds (SPEC 6.2). Opt-in in 3.7.0.
+public final class ApproovAlwaysProceedMutator: ApproovServiceMutator, CustomStringConvertible {
+    static let instance = ApproovAlwaysProceedMutator()
+    private init() {}
+    public var description: String { "ApproovServiceMutator.ALWAYS_PROCEED" }
+
+    public func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult,
+                                                  url: String) throws -> Bool {
+        switch approovResults.status {
+        case .unknownURL, .unprotectedURL:
+            return false
+        default:
+            return true
+        }
+    }
+}
+
+public extension ApproovServiceMutator where Self == ApproovCloseFailureMutator {
+    static var CLOSE_FAILURE: ApproovCloseFailureMutator { ApproovCloseFailureMutator.instance }
+    /// The out-of-the-box mutator: CLOSE_FAILURE in 3.7.0, planned to be ALWAYS_PROCEED in 4.0.0 (SPEC 5.5).
+    static var DEFAULT: ApproovServiceMutator { ApproovCloseFailureMutator.instance }
+}
+
+public extension ApproovServiceMutator where Self == ApproovAlwaysProceedMutator {
+    static var ALWAYS_PROCEED: ApproovAlwaysProceedMutator { ApproovAlwaysProceedMutator.instance }
+}
+
+@available(*, deprecated, message: "Use ApproovCloseFailureMutator.DEFAULT or .CLOSE_FAILURE.")
 public struct ApproovServiceMutatorDefault: ApproovServiceMutator, CustomStringConvertible {
     public static let shared = ApproovServiceMutatorDefault()
-
-    public var description: String {
-        return "ApproovServiceMutator.DEFAULT"
-    }
-
+    public var description: String { "ApproovServiceMutator.DEFAULT" }
     private init() {}
 }
