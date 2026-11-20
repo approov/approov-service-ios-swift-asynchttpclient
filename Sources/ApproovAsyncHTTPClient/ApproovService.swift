@@ -609,6 +609,14 @@ public class ApproovService {
             return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
         }
 
+        // WebSockets are not supported (SPEC 2.7, T37-31). An upgrade request goes out as the app wrote it, with no
+        // token or secure string fetch. Its connection is still checked, because AsyncHTTPClient checks every one.
+        let upgrades = request.headers["Upgrade"].flatMap { $0.split(separator: ",") }
+        if upgrades.contains(where: { $0.trimmingCharacters(in: .whitespaces).lowercased() == "websocket" }) {
+            log(.debug, "ApproovService: WebSocket upgrade forwarded unchanged: \(loggableURL(url))")
+            return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
+        }
+
         do {
             if try !ApproovRequestPathError.callHook("handleInterceptorShouldProcessRequest", {
                 try mutator.handleInterceptorShouldProcessRequest(request)

@@ -1321,6 +1321,21 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(status, 307, "a body that can be sent only once is not sent again, as in AsyncHTTPClient")
     }
 
+    // T37-31, SPEC 2.7: WebSockets are not supported. An upgrade request goes out untouched, with no fetch.
+    func testWebSocketUpgradeIsForwardedUntouched() throws {
+        try secureStringScenario()
+        ApproovService.setServiceMutator(signer())
+        MiniSDKAttesterProxyController.clearCallLog()
+        let headers = HTTPHeaders([("Connection", "Upgrade"), ("Upgrade", "WebSocket"), ("Api-Key", "Bearer header-key")])
+        let url = targetURLString + "/ws?k=query-key"
+        let response = ApproovService.updateRequestWithApproov(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: url)), method: "GET", headers: headers))
+        XCTAssertEqual(response.decision, .ShouldIgnore)
+        XCTAssertEqual(response.request.headers, headers, "no token, trace, signature or substitution")
+        XCTAssertEqual(response.request.url.absoluteString, url)
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog().filter { $0.hasPrefix("fetch") }, [], "no fetch")
+    }
+
     // MARK: - §5 Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
