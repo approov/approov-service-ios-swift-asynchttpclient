@@ -553,7 +553,15 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
     }
 
     public func getAuthority() -> String {
-        return request.url.host ?? ""
+        // RFC 9421 section 2.2.3: lowercase host, default port left out
+        guard let host = request.url.host else {
+            return ""
+        }
+        let scheme = request.url.scheme?.lowercased()
+        if let port = request.url.port, !((scheme == "https" && port == 443) || (scheme == "http" && port == 80)) {
+            return "\(host.lowercased()):\(port)"
+        }
+        return host.lowercased()
     }
 
     public func getScheme() -> String {

@@ -818,6 +818,56 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §5 Message Signing
 
+    func testAuthorityIsLowercaseWithANonDefaultPort() throws {
+        func authority(_ url: String) throws -> String {
+            ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
+                url: try XCTUnwrap(URL(string: url)), method: "GET", headers: HTTPHeaders())).getAuthority()
+        }
+        XCTAssertEqual(try authority("https://Example.COM:8443/p"), "example.com:8443")
+        XCTAssertEqual(try authority("https://example.com:443/p"), "example.com", "default port left out (RFC 9421 2.2.3)")
+        XCTAssertEqual(try authority("http://example.com:80/p"), "example.com")
+    }
+
+    func testHostFactoryMatchesTheNormalisedHost() throws {
+        try reinitializeServiceWithTargetHost()
+        let host = try XCTUnwrap(URL(string: targetURLString)?.host)
+        let accountOnly = ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory().setUseAccountMessageSigning()
+        let signer = ApproovDefaultMessageSigning()
+            .setDefaultFactory(ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory())
+            .putHostFactory(hostName: host.uppercased() + ".", factory: accountOnly)
+        let response = try decide(targetURLString, mutator: signer)
+        XCTAssertTrue(try XCTUnwrap(response.request.headers.first(name: "Signature")).hasPrefix("account=:"))
+    }
+
+    private final class TargetURIRecorder: ApproovServiceMutator {
+        let signed = NIOLockedValueBox<String?>(nil)
+        func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+            signed.withLockedValue { $0 = ApproovAsyncHTTPClientComponentProvider(request: request).getTargetUri() }
+            return request
+        }
+    }
+
+    // SPEC 3.7, TR "Target URI Is The Wire URL": the signed @target-uri equals the URL the server receives.
+    func testTargetURIIsTheWireURL() async throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString + "/p/a%20b?q=x|y&s=%20&p=%25&n=\u{00E9}"
+        let recorder = TargetURIRecorder()
+        ApproovService.setServiceMutator(recorder)
+
+        let legacy = fetchNetworkReply(for: try HTTPClient.Request(url: url, method: .GET))
+        XCTAssertNotNil(legacy?["url"] as? String, "control: the echo carries the URL it received")
+        XCTAssertEqual(recorder.signed.withLockedValue { $0 }, legacy?["url"] as? String, "HTTPClient.Request API")
+
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+        let response = try await client.execute(HTTPClientRequest(url: url), timeout: .seconds(30))
+        var collected = ByteBuffer()
+        for try await var part in response.body { collected.writeBuffer(&part) }
+        let echo = try JSONSerialization.jsonObject(with: Data(collected.readableBytesView)) as? [String: Any]
+        XCTAssertNotNil(echo?["url"] as? String, "control: the echo carries the URL it received")
+        XCTAssertEqual(recorder.signed.withLockedValue { $0 }, echo?["url"] as? String, "HTTPClientRequest API")
+    }
+
     // T37-08: a failure that proceeds to a listed host is signed over the token header as sent.
     func testFailureThatProceedsIsSigned() throws {
         try reinitializeServiceWithTargetHost()
