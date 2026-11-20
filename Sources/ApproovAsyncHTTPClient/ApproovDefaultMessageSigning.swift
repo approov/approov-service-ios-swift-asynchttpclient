@@ -448,7 +448,7 @@ public class SignatureParametersFactory {
         requestParameters.setAlg(useAccountMessageSigning ? ApproovDefaultMessageSigning.ALG_HS256 : ApproovDefaultMessageSigning.ALG_ES256)
 
         if addCreated || expiresLifetime > 0 {
-            let currentTime = Int64(Date().timeIntervalSince1970)
+            let currentTime = ApproovService.serverAdjustedTimeMS() / 1000
             if addCreated {
                 requestParameters.setCreated(currentTime)
             }

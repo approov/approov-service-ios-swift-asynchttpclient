@@ -818,6 +818,40 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     // MARK: - §5 Message Signing
 
+    private func signatureCreated(_ response: ApproovUpdateResponse) throws -> Int64 {
+        let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
+        let range = try XCTUnwrap(input.range(of: #"created=(\d+)"#, options: .regularExpression))
+        return try XCTUnwrap(Int64(input[range].dropFirst("created=".count)))
+    }
+
+    func testSignatureTimesFollowTheServerAdjustedClock() throws {
+        try reinitializeServiceWithTargetHost()
+        MiniSDKAttesterProxyController.setServerTimeOffsetMS(3_600_000)
+        defer { MiniSDKAttesterProxyController.setServerTimeOffsetMS(0) }
+        let signer = ApproovDefaultMessageSigning()
+            .setDefaultFactory(ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory())
+        let response = try decide(targetURLString, mutator: signer)
+        let created = try signatureCreated(response)
+        let deviceNow = Int64(Date().timeIntervalSince1970)
+        XCTAssertLessThan(abs(created - (deviceNow + 3600)), 10, "created follows the server adjusted time (SPEC 3.8)")
+        let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
+        XCTAssertTrue(input.contains("expires=\(created + 15)"), "expires is created plus the lifetime")
+    }
+
+    func testGetServerAdjustedCurrentTimeMS() throws {
+        try reinitializeServiceWithTargetHost()
+        MiniSDKAttesterProxyController.setServerTimeOffsetMS(60_000)
+        defer { MiniSDKAttesterProxyController.setServerTimeOffsetMS(0) }
+        let deviceNowMS = Int64(Date().timeIntervalSince1970 * 1000)
+        XCTAssertLessThan(abs(try ApproovService.getServerAdjustedCurrentTimeMS() - (deviceNowMS + 60_000)), 5_000)
+        ApproovService.resetForTesting()
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertThrowsError(try ApproovService.getServerAdjustedCurrentTimeMS()) { error in
+            guard case let ApproovError.permanentError(message) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(message, "getServerAdjustedCurrentTimeMS: SDK not initialized")
+        }
+    }
+
     func testTargetUriOmitsFragment() throws {
         let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
             url: try XCTUnwrap(URL(string: "https://example.com/p?q=1#frag")), method: "GET", headers: HTTPHeaders()))

@@ -132,6 +132,9 @@ public class ApproovService {
     /** True once the deprecated getMessageSignature has logged its warning in this process */
     private static var messageSignatureWarned = false
 
+    /** True once the device clock warning of serverAdjustedTimeMS has been logged in this process */
+    private static var deviceClockWarned = false
+
     /** Lock for the logging level and the test log sink */
     private static let logLock = NIOLock()
 
@@ -1159,5 +1162,41 @@ public class ApproovService {
      */
     public static func getLastARC() -> String {
         stateLock.withLock { _lastARC }
+    }
+
+    /**
+     * Gets the current time in milliseconds, adjusted to the Approov servers' clock by the SDK (SPEC 3.8). It
+     * requires Approov protection, like the other direct methods.
+     */
+    public static func getServerAdjustedCurrentTimeMS() throws -> Int64 {
+        if !isApproovEnabled() {
+            logApproovUnavailable("getServerAdjustedCurrentTimeMS")
+            throw ApproovError.permanentError(message: "getServerAdjustedCurrentTimeMS: SDK not initialized")
+        }
+        return serverAdjustedTimeMS()
+    }
+
+    /**
+     * The server adjusted time from the SDK, found at run time because SDK 3.5.3 does not have the method. If it
+     * is unavailable, the device clock is used and one warning is logged (SPEC 3.8).
+     */
+    static func serverAdjustedTimeMS() -> Int64 {
+        let selector = NSSelectorFromString("getServerAdjustedCurrentTimeMS")
+        let sdk: AnyObject = Approov.self
+        if sdk.responds(to: selector), let implementation = sdk.method(for: selector) {
+            typealias ServerAdjustedTime = @convention(c) (AnyObject, Selector) -> Int64
+            let time = unsafeBitCast(implementation, to: ServerAdjustedTime.self)(sdk, selector)
+            if time > 0 {
+                return time
+            }
+        }
+        let firstUse = stateLock.withLock { () -> Bool in
+            defer { deviceClockWarned = true }
+            return !deviceClockWarned
+        }
+        if firstUse {
+            log(.warning, "ApproovService: the Approov servers' time is unavailable, using the device clock")
+        }
+        return Int64(Date().timeIntervalSince1970 * 1000)
     }
 }
