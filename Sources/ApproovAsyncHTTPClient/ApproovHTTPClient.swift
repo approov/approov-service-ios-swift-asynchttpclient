@@ -38,6 +38,10 @@ public class ApproovHTTPClient {
     /// Why Approov pinning cannot run on this client, or nil when it can (D5).
     let pinningUnavailableReason: String?
 
+    /// The app's redirect settings, or nil when the app disallows redirects. The wrapped client never follows a
+    /// redirect: this client follows it and protects each hop as a new request (D3, SPEC 7.3).
+    let redirectPolicy: ApproovRedirectPolicy?
+
     internal static let loggingDisabled = Logger(label: "ApproovHTTPClient-do-not-log",
         factory: { _ in SwiftLogNoOpLogHandler() })
 
@@ -61,8 +65,11 @@ public class ApproovHTTPClient {
     public required init(eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider,
                          configuration: HTTPClient.Configuration = HTTPClient.Configuration(),
                          backgroundActivityLogger: Logger) {
+        var wrappedConfiguration = configuration
+        wrappedConfiguration.redirectConfiguration = .disallow
+        redirectPolicy = ApproovRedirectPolicy.of(configuration.redirectConfiguration)
         httpClientDelegate = HTTPClient(eventLoopGroupProvider: eventLoopGroupProvider,
-                   configuration: configuration,
+                   configuration: wrappedConfiguration,
                    backgroundActivityLogger: backgroundActivityLogger)
         // AsyncHTTPClient runs the Approov pin check only on the Network.framework path, which needs a
         // NIOTSEventLoopGroup, and only when TLS verification is full.
@@ -461,7 +468,8 @@ public class ApproovHTTPClient {
             eventLoopPreference: preference,
             deadline: deadline,
             logger: originalLogger ?? ApproovHTTPClient.loggingDisabled,
-            pinningUnavailableReason: reason)
+            pinningUnavailableReason: reason,
+            redirectPolicy: redirectPolicy)
         task.runInBackground()
         return task
     }
@@ -680,6 +688,9 @@ extension ApproovHTTPClient {
         // Why Approov pinning cannot run for this request, or nil when it can
         let pinningUnavailableReason: String?
 
+        // The app's redirect settings, or nil when the app disallows redirects
+        let redirectPolicy: ApproovRedirectPolicy?
+
         // Wrapped HTTPClient.Task
         private var _httpClientTask: HTTPClient.Task<Delegate.Response>?
 
@@ -690,8 +701,10 @@ extension ApproovHTTPClient {
              eventLoopPreference: ApproovHTTPClient.EventLoopPreference,
              deadline: NIODeadline? = nil,
              logger: Logger,
-             pinningUnavailableReason: String? = nil) {
+             pinningUnavailableReason: String? = nil,
+             redirectPolicy: ApproovRedirectPolicy? = nil) {
             self.pinningUnavailableReason = pinningUnavailableReason
+            self.redirectPolicy = redirectPolicy
             self.httpClient = httpClientDelegate
             self.request = request
             self.delegate = delegate
@@ -721,55 +734,85 @@ extension ApproovHTTPClient {
             }
         }
 
-        // Runs updating the request for Approov on a background thread and, when this completes, executes the request
-        // using an HTTPClient
+        // Runs the request as a chain of hops. Each hop is the app's request for its URL, protected on a background
+        // thread as a new request, under the mutator that the request started with (SPEC 6.5, 7.3).
         public func runInBackground() {
             DispatchQueue.global(qos: .userInitiated).async {
-                let start = ProcessInfo.processInfo.systemUptime
-                do {
-                    try ApproovHTTPClient.checkPinningAvailable(self.pinningUnavailableReason)
-                    // Update the request for Approov
-                    let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request, mutator: ApproovService.getServiceMutator(), substituteQuery: true)
-                    if self.isCancelled {
-                        self.promise.fail(HTTPClientError.cancelled)
-                        return
-                    }
-                    // Execute the modified request using the original HTTPClient
-                    let httpClientTask = self.httpClient.execute(
-                        request: updatedRequest,
-                        delegate: self.delegate,
-                        eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
-                        deadline: self.deadline,
-                        logger: self.logger)
-                    // Store the task and re-check cancellation under the same lock to close the race
-                    // where cancel() arrives between the check above and the task being stored: such a
-                    // cancel() would otherwise read a nil task and the request would run uncancelled.
-                    let cancelledBeforeStore = self.lock.withLock { () -> Bool in
-                        if self._isCancelled {
-                            return true
-                        }
-                        self._httpClientTask = httpClientTask
-                        return false
-                    }
-                    if cancelledBeforeStore {
-                        httpClientTask.cancel()
-                        self.promise.fail(HTTPClientError.cancelled)
-                        return
-                    }
-                    // Set up the promise to complete when the wrapped HTTPClient.Task's promise completes
-                    httpClientTask.futureResult.whenComplete { result in
-                        switch result {
-                        case .failure(let error):
-                            self.promise.fail(ApproovPinningVerifier.mapPinningFailure(error, host: updatedRequest.url.host, since: start))
-                        case .success(let response):
-                            self.promise.succeed(response)
-                        }
-                    }
-                } catch {
-                    self.promise.fail(error)
+                let mutator = ApproovService.getServiceMutator()
+                let tracker = self.redirectPolicy.map {
+                    ApproovRedirectTracker(policy: $0, initialURL: self.request.url.absoluteString)
                 }
+                self.runHop(ApproovRequestHop(request: self.request, substituteQuery: true), tracker: tracker, mutator: mutator)
             }
-       }
+        }
+
+        // Protects and sends one hop. It runs off the event loop, because the token fetch blocks.
+        private func runHop(_ hop: ApproovRequestHop, tracker: ApproovRedirectTracker?, mutator: ApproovServiceMutator) {
+            let start = ProcessInfo.processInfo.systemUptime
+            do {
+                try ApproovHTTPClient.checkPinningAvailable(self.pinningUnavailableReason)
+                let wireRequest = try ApproovHTTPClient.approovUpdateRequest(
+                    request: hop.request, mutator: mutator, substituteQuery: hop.substituteQuery)
+                if self.isCancelled {
+                    self.promise.fail(HTTPClientError.cancelled)
+                    return
+                }
+                let forwarder = ApproovRedirectForwarder(delegate: self.delegate, wireURL: wireRequest.url,
+                                                         follows: tracker != nil)
+                let httpClientTask = self.httpClient.execute(
+                    request: wireRequest,
+                    delegate: forwarder,
+                    eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
+                    deadline: self.deadline,
+                    logger: self.logger)
+                // Store the task and re-check cancellation under the same lock to close the race
+                // where cancel() arrives between the check above and the task being stored: such a
+                // cancel() would otherwise read a nil task and the request would run uncancelled.
+                let cancelledBeforeStore = self.lock.withLock { () -> Bool in
+                    if self._isCancelled {
+                        return true
+                    }
+                    self._httpClientTask = httpClientTask
+                    return false
+                }
+                if cancelledBeforeStore {
+                    httpClientTask.cancel()
+                    self.promise.fail(HTTPClientError.cancelled)
+                    return
+                }
+                httpClientTask.futureResult.whenComplete { result in
+                    switch result {
+                    case .success(let response):
+                        self.promise.succeed(response)
+                    case .failure(let redirect as ApproovRedirectSignal):
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            self.follow(redirect, from: hop, wireURL: wireRequest.url, tracker: tracker, mutator: mutator)
+                        }
+                    case .failure(let error):
+                        self.promise.fail(ApproovPinningVerifier.mapPinningFailure(error, host: wireRequest.url.host, since: start))
+                    }
+                }
+            } catch {
+                self.promise.fail(error)
+            }
+        }
+
+        // Starts the next hop of a redirect, inside the app's redirect limits.
+        private func follow(_ redirect: ApproovRedirectSignal, from hop: ApproovRequestHop, wireURL: URL,
+                            tracker: ApproovRedirectTracker?, mutator: ApproovServiceMutator) {
+            // The forwarder reports a redirect only when the app follows redirects, so the tracker is set.
+            guard var tracker else {
+                self.promise.fail(HTTPClientError.redirectLimitReached)
+                return
+            }
+            do {
+                try tracker.redirect(to: redirect.target.absoluteString)
+                let next = try hop.following(status: redirect.status, to: redirect.target, wireURL: wireURL)
+                self.runHop(next, tracker: tracker, mutator: mutator)
+            } catch {
+                self.promise.fail(error)
+            }
+        }
 
         /// `EventLoopFuture` for the response returned by the request.
         public var futureResult: EventLoopFuture<Delegate.Response> {

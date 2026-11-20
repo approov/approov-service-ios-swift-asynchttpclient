@@ -191,3 +191,75 @@ struct ApproovClientRequestHop {
         return ApproovClientRequestHop(request: nextRequest, substituteQuery: url.appQuery)
     }
 }
+
+/// Tells the wrapper that a hop's response is a redirect to follow. It never reaches the app.
+struct ApproovRedirectSignal: Error {
+    let status: HTTPResponseStatus
+    let target: URL
+}
+
+/// Hides a redirect response from the app's delegate, as AsyncHTTPClient does, and reports it to the wrapper with
+/// `ApproovRedirectSignal`. Every other call goes to the app's delegate with the same task, so the delegate sees one
+/// request. AsyncHTTPClient calls a delegate on the task's event loop only, so the state needs no lock.
+final class ApproovRedirectForwarder<Delegate: HTTPClientResponseDelegate>: HTTPClientResponseDelegate {
+    typealias Response = Delegate.Response
+
+    /// AsyncHTTPClient drains at most 3 KB of a redirect response, then closes the connection.
+    static var maxRedirectBodyBytes: Int { 3 * 1024 }
+
+    private let delegate: Delegate
+    private let wireURL: URL
+    private let follows: Bool
+    private var redirect: ApproovRedirectSignal?
+    private var redirectBodyBytes = 0
+
+    init(delegate: Delegate, wireURL: URL, follows: Bool) {
+        self.delegate = delegate
+        self.wireURL = wireURL
+        self.follows = follows
+    }
+
+    func didSendRequestHead(task: HTTPClient.Task<Response>, _ head: HTTPRequestHead) {
+        delegate.didSendRequestHead(task: task, head)
+    }
+
+    func didSendRequestPart(task: HTTPClient.Task<Response>, _ part: IOData) {
+        delegate.didSendRequestPart(task: task, part)
+    }
+
+    func didSendRequest(task: HTTPClient.Task<Response>) {
+        delegate.didSendRequest(task: task)
+    }
+
+    func didReceiveHead(task: HTTPClient.Task<Response>, _ head: HTTPResponseHead) -> EventLoopFuture<Void> {
+        if follows, let target = ApproovRedirects.target(status: head.status, headers: head.headers, from: wireURL) {
+            redirect = ApproovRedirectSignal(status: head.status, target: target)
+            return task.eventLoop.makeSucceededVoidFuture()
+        }
+        return delegate.didReceiveHead(task: task, head)
+    }
+
+    func didReceiveBodyPart(task: HTTPClient.Task<Response>, _ buffer: ByteBuffer) -> EventLoopFuture<Void> {
+        guard let redirect else {
+            return delegate.didReceiveBodyPart(task: task, buffer)
+        }
+        redirectBodyBytes += buffer.readableBytes
+        if redirectBodyBytes > Self.maxRedirectBodyBytes {
+            return task.eventLoop.makeFailedFuture(redirect)
+        }
+        return task.eventLoop.makeSucceededVoidFuture()
+    }
+
+    func didReceiveError(task: HTTPClient.Task<Response>, _ error: Error) {
+        if redirect == nil {
+            delegate.didReceiveError(task: task, error)
+        }
+    }
+
+    func didFinishRequest(task: HTTPClient.Task<Response>) throws -> Response {
+        if let redirect {
+            throw redirect
+        }
+        return try delegate.didFinishRequest(task: task)
+    }
+}

@@ -1154,6 +1154,132 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         })
     }
 
+    // T37-13, T37-13a, T37-25: a redirect to another origin carries nothing that the layer added. The hop is a new
+    // request for its target, the target URL is used as the server sent it, and a query value from Location is
+    // never looked up.
+    func testRedirectToAnotherOriginCarriesNoProtection() throws {
+        try redirectScenario()
+        ApproovService.setServiceMutator(signer())
+        let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        let location = "https://\(unprotected)/landing?k=query-key"
+        let request = try HTTPClient.Request(
+            url: redirectURL(to: location, status: 307), method: .POST,
+            headers: HTTPHeaders([("Api-Key", "Bearer header-key"), ("Authorization", "app-auth")]),
+            body: .string("payload"))
+        MiniSDKAttesterProxyController.clearCallLog()
+        let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+        XCTAssertEqual(reply["url"] as? String, location, "T37-13a: the URL as the server sent it")
+        XCTAssertEqual(reply["method"] as? String, "POST")
+        XCTAssertEqual(reply["body"] as? String, "payload", "a 307 sends the body again")
+        for name in ["Approov-Token", "Approov-TraceID", "Signature", "Signature-Input", "Content-Digest"] {
+            XCTAssertNil(getHeader(from: reply, key: name), "\(name) must not reach another origin")
+        }
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "T37-25: the placeholder as the app wrote it")
+        XCTAssertNil(getHeader(from: reply, key: "Authorization"), "AsyncHTTPClient drops Authorization on another origin")
+        let calls = MiniSDKAttesterProxyController.callLog()
+        XCTAssertTrue(calls.contains { $0.hasPrefix("fetchApproovTokenAndWait:") && $0.contains("/redirect-to") }, "\(calls)")
+        XCTAssertTrue(calls.contains("fetchSecureStringAndWait:header-key"), "the first hop was protected: \(calls)")
+        XCTAssertTrue(calls.contains("fetchApproovTokenAndWait:\(location)"), "the hop is evaluated for its target: \(calls)")
+        XCTAssertFalse(calls.contains("fetchSecureStringAndWait:query-key"), "T37-13a: \(calls)")
+    }
+
+    // T37-13: a redirect to a second protected host fetches a token for the target and never carries the first one.
+    func testRedirectToASecondProtectedHostFetchesItsOwnToken() throws {
+        let first = try XCTUnwrap(URL(string: targetURLString)?.host)
+        let second = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
+        try reinitializeService(scenarioJSON: scenarioJSON(caseName: uniqueCaseName(prefix: "two-protected"), body: """
+            "protectedDomains": ["\(first)", "\(second)"], "noApproovTokenDomains": []
+            """), comment: "reinit-two-protected")
+        ApproovService.setServiceMutator(signer())
+        let location = "https://\(second)/second"
+        let reply = try XCTUnwrap(fetchNetworkReply(for: HTTPClient.Request(url: redirectURL(to: location, status: 302),
+                                                                             method: .GET)))
+        XCTAssertEqual(reply["url"] as? String, location)
+        let token = try XCTUnwrap(getHeader(from: reply, key: "Approov-Token"))
+        XCTAssertEqual(decodeJWTBody(token)?["aud"] as? String, second, "the target's own token")
+        XCTAssertNotNil(getHeader(from: reply, key: "Signature"), "signed again for the target")
+        XCTAssertNotNil(getHeader(from: reply, key: "Signature-Input"))
+    }
+
+    // T37-13: a same-origin 303 is protected again and signed again over the new method and target.
+    func testSameOrigin303IsProtectedAgainAsGET() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(signer())
+        let location = targetURLString + "/after-303"
+        let request = try HTTPClient.Request(url: redirectURL(to: location, status: 303), method: .POST,
+                                             headers: HTTPHeaders([("Content-Type", "text/plain")]), body: .string("payload"))
+        MiniSDKAttesterProxyController.clearCallLog()
+        let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+        XCTAssertEqual(reply["url"] as? String, location)
+        XCTAssertEqual(reply["method"] as? String, "GET")
+        XCTAssertNil(getHeader(from: reply, key: "Content-Type"), "AsyncHTTPClient drops the body headers on a 303")
+        XCTAssertNil(getHeader(from: reply, key: "Content-Digest"), "no body, no digest")
+        XCTAssertNotNil(getHeader(from: reply, key: "Approov-Token"))
+        XCTAssertNotNil(getHeader(from: reply, key: "Signature"))
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog().filter { $0.hasPrefix("fetchApproovTokenAndWait:") }.count, 2,
+                       "each hop fetches its own token")
+    }
+
+    // The app's redirect settings apply, and the app's delegate sees one response head, the final one.
+    func testRedirectSettingsAreTheApps() throws {
+        try reinitializeServiceWithTargetHost()
+        let location = targetURLString + "/final"
+        let once = try redirectURL(to: location, status: 302)
+        let twice = try redirectURL(to: once, status: 302)
+
+        let disallow = ApproovHTTPClient(eventLoopGroupProvider: .createNew,
+                                         configuration: HTTPClient.Configuration(redirectConfiguration: .disallow))
+        defer { try? disallow.syncShutdown() }
+        XCTAssertEqual(try disallow.execute(request: HTTPClient.Request(url: once, method: .GET)).wait().status, .found)
+
+        let one = ApproovHTTPClient(eventLoopGroupProvider: .createNew,
+                                    configuration: HTTPClient.Configuration(redirectConfiguration: .follow(max: 1, allowCycles: false)))
+        defer { try? one.syncShutdown() }
+        XCTAssertEqual(try one.execute(request: HTTPClient.Request(url: once, method: .GET)).wait().status, .ok)
+        XCTAssertThrowsError(try one.execute(request: HTTPClient.Request(url: twice, method: .GET)).wait()) {
+            XCTAssertEqual($0 as? HTTPClientError, .redirectLimitReached)
+        }
+
+        let follows = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? follows.syncShutdown() }
+        let heads = try follows.execute(request: HTTPClient.Request(url: twice, method: .GET), delegate: HeadRecorder()).wait()
+        XCTAssertEqual(heads, [200])
+    }
+
+    // SPEC 6.5: the mutator that the request started with decides every hop, also after setServiceMutator.
+    func testOneMutatorDecidesEveryHop() throws {
+        try reinitializeServiceWithTargetHost()
+        let later = HopRecordingMutator()
+        let first = HopRecordingMutator { _ in ApproovService.setServiceMutator(later) }
+        ApproovService.setServiceMutator(first)
+        let location = targetURLString + "/after-mutator-change"
+        _ = try XCTUnwrap(fetchNetworkReply(for: HTTPClient.Request(url: redirectURL(to: location, status: 302), method: .GET)))
+        let firstURLs = first.urls.withLockedValue { $0 }
+        XCTAssertEqual(firstURLs.count, 2, "both hops: \(firstURLs)")
+        XCTAssertEqual(firstURLs.last, location)
+        XCTAssertEqual(later.urls.withLockedValue { $0 }, [], "a later mutator never decides a hop of this request")
+    }
+
+    // cancel() works across hops: a cancel while the second hop is processed stops the request.
+    func testCancelStopsTheNextHop() throws {
+        try reinitializeServiceWithTargetHost()
+        let location = targetURLString + "/never-sent"
+        let cancel = NIOLockedValueBox<(() -> Void)?>(nil)
+        ApproovService.setServiceMutator(HopRecordingMutator { request in
+            if request.url.absoluteString == location {
+                cancel.withLockedValue { $0 }?()
+            }
+        })
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+        let request = try HTTPClient.Request(url: redirectURL(to: location, status: 302), method: .GET)
+        let task = client.execute(request: request, delegate: ResponseAccumulator(request: request))
+        cancel.withLockedValue { $0 = { task.cancel() } }
+        XCTAssertThrowsError(try task.wait()) {
+            XCTAssertEqual($0 as? HTTPClientError, .cancelled)
+        }
+    }
+
     // MARK: - §5 Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
@@ -1977,6 +2103,24 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse((response.error?.localizedDescription ?? "").contains("Bearer\n"))
     }
 
+    /// A URL on the echo worker that answers with a redirect to `target`, a sibling host of the worker.
+    private func redirectURL(to target: String, status: Int) throws -> String {
+        let host = try XCTUnwrap(URL(string: targetURLString)?.host)
+        let encoded = try XCTUnwrap(target.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        return "https://\(host)/redirect-to?url=\(encoded)&status=\(status)"
+    }
+
+    /// The target host is protected and has secure strings. The unprotected host is not added to Approov, so the SDK
+    /// answers UNKNOWN_URL for it.
+    private func redirectScenario() throws {
+        try reinitializeServiceWithTargetHost(scenarioBody: """
+            "noApproovTokenDomains": [],
+            "initialSecureStrings": { "header-key": "header-secret", "query-key": "query-secret" }
+            """)
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: "Bearer ")
+        ApproovService.addSubstitutionQueryParam(key: "k")
+    }
+
     private func secureStringScenario() throws {
         let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
         try reinitializeServiceWithTargetHost(scenarioBody: """
@@ -2290,5 +2434,36 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     private func sha256Base64(_ value: String) -> String {
         Data(SHA256.hash(data: Data(value.utf8))).base64EncodedString()
+    }
+}
+
+/// Records the status of every response head that a delegate receives.
+private final class HeadRecorder: HTTPClientResponseDelegate {
+    typealias Response = [UInt]
+    private let statuses = NIOLockedValueBox<[UInt]>([])
+
+    func didReceiveHead(task: HTTPClient.Task<[UInt]>, _ head: HTTPResponseHead) -> EventLoopFuture<Void> {
+        statuses.withLockedValue { $0.append(head.status.code) }
+        return task.eventLoop.makeSucceededVoidFuture()
+    }
+
+    func didFinishRequest(task: HTTPClient.Task<[UInt]>) throws -> [UInt] {
+        statuses.withLockedValue { $0 }
+    }
+}
+
+/// A service mutator that records each request it is asked about and runs an action on it.
+private final class HopRecordingMutator: ApproovServiceMutator {
+    let urls = NIOLockedValueBox<[String]>([])
+    private let onRequest: (ApproovRequest) -> Void
+
+    init(onRequest: @escaping (ApproovRequest) -> Void = { _ in }) {
+        self.onRequest = onRequest
+    }
+
+    func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool {
+        urls.withLockedValue { $0.append(request.url.absoluteString) }
+        onRequest(request)
+        return true
     }
 }
