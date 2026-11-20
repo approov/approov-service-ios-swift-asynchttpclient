@@ -99,9 +99,6 @@ public class ApproovService {
     /** Lock to manage variable access */
     private static let stateLock = NIOLock()
 
-    /** True if the interceptor should proceed on network failures and not add an Approov token */
-    private static var _proceedOnNetworkFail = false
-
     /** Map of names for headers that should have their values substituted for secure strings, mapped to their required prefixes */
     private static var substitutionHeaders: Dictionary<String, String> = Dictionary<String, String>()
 
@@ -132,12 +129,8 @@ public class ApproovService {
     /** Current logging level */
     private static var _loggingLevel: ApproovLogLevel = .info
 
-    /** Failure cache variables */
-    private static let failureCacheLock = NIOLock()
-    private static var cachedFailureResult: ApproovTokenFetchResult? = nil
-    private static var cachedFailureTime: TimeInterval? = nil
-    private static var failureCacheTTL: TimeInterval = 0.5 // seconds
-    private static var failureCacheMissGroup: DispatchGroup? = nil
+    /** The ARC of the most recent fetch the layer made, from the request path or a direct method (SPEC 5.3) */
+    private static var _lastARC = ""
 
     public static var loggingLevel: ApproovLogLevel {
         get {
@@ -185,7 +178,6 @@ public class ApproovService {
             _approovConfigString = config
 
             stateLock.withLock {
-                _proceedOnNetworkFail = false
                 _bindHeader = ""
                 _approovTokenHeader = "Approov-Token"
                 _approovTokenPrefix = ""
@@ -195,12 +187,7 @@ public class ApproovService {
                 substitutionQueryParams = Set()
                 exclusionURLRegexs = Dictionary()
                 _useApproovStatusIfNoToken = false
-            }
-
-            failureCacheLock.withLock {
-                cachedFailureResult = nil
-                cachedFailureTime = nil
-                failureCacheMissGroup = nil
+                _lastARC = ""
             }
 
             approovSDKInitialised = true
@@ -220,7 +207,6 @@ public class ApproovService {
             _approovConfigString = nil
         }
         stateLock.withLock {
-            _proceedOnNetworkFail = false
             _bindHeader = ""
             _approovTokenHeader = "Approov-Token"
             _approovTokenPrefix = ""
@@ -230,11 +216,7 @@ public class ApproovService {
             substitutionQueryParams = Set()
             exclusionURLRegexs = Dictionary()
             _useApproovStatusIfNoToken = false
-        }
-        failureCacheLock.withLock {
-            cachedFailureResult = nil
-            cachedFailureTime = nil
-            failureCacheMissGroup = nil
+            _lastARC = ""
         }
     }
 
@@ -292,20 +274,6 @@ public class ApproovService {
             throw error
         } catch {
             throw ApproovError.permanentError(message: "\(context): \(error.localizedDescription)")
-        }
-    }
-
-    /**
-     * Sets a flag indicating if the network interceptor should proceed anyway if it is
-     * not possible to obtain an Approov token due to a networking failure.
-     */
-    @available(*, deprecated, message: "No longer used internally. Use setServiceMutator to customize network failure behavior.")
-    public static var proceedOnNetworkFail: Bool {
-        get {
-            stateLock.withLock { _proceedOnNetworkFail }
-        }
-        set {
-            stateLock.withLock { _proceedOnNetworkFail = newValue }
         }
     }
 
@@ -385,16 +353,6 @@ public class ApproovService {
         Approov.setDevKey(devKey)
         if loggingLevel >= .debug {
             os_log("ApproovService: setDevKey", type: .debug)
-        }
-    }
-
-    /**
-     * Allows token prefetch operation to be performed as early as possible.
-     */
-    @available(*, deprecated, message: "Prefetch is managed automatically by the underlying SDK.")
-    public static func prefetch() {
-        if loggingLevel >= .warning {
-            os_log("ApproovService: prefetch is no longer used and does nothing.")
         }
     }
 
@@ -541,92 +499,6 @@ public class ApproovService {
         }
     }
 
-    private static func getCachedFailure() -> ApproovTokenFetchResult? {
-        return failureCacheLock.withLock {
-            return getCachedFailureLocked()
-        }
-    }
-
-    private static func getCachedFailureLocked() -> ApproovTokenFetchResult? {
-        guard let result = cachedFailureResult,
-              let time = cachedFailureTime else {
-            return nil
-        }
-        if (ProcessInfo.processInfo.systemUptime - time) < failureCacheTTL {
-            if loggingLevel >= .debug {
-                os_log("ApproovService: using cached failure: %@", type: .debug, Approov.string(from: result.status))
-            }
-            return result
-        }
-        cachedFailureResult = nil
-        cachedFailureTime = nil
-        return nil
-    }
-
-    private static func fetchTokenWithFailureCache(url: String) -> ApproovTokenFetchResult {
-        var missGroupToWaitFor: DispatchGroup?
-        var ownedMissGroup: DispatchGroup?
-
-        if let cachedResult = failureCacheLock.withLock({ () -> ApproovTokenFetchResult? in
-            if let result = getCachedFailureLocked() {
-                return result
-            }
-            if let missGroup = failureCacheMissGroup {
-                missGroupToWaitFor = missGroup
-            } else {
-                let missGroup = DispatchGroup()
-                missGroup.enter()
-                failureCacheMissGroup = missGroup
-                ownedMissGroup = missGroup
-            }
-            return nil
-        }) {
-            return cachedResult
-        }
-
-        if let missGroupToWaitFor {
-            missGroupToWaitFor.wait()
-            if let cachedResult = getCachedFailure() {
-                return cachedResult
-            }
-            let result = Approov.fetchTokenAndWait(url)
-            cacheFailureIfNeeded(result)
-            return result
-        }
-
-        let result = Approov.fetchTokenAndWait(url)
-        failureCacheLock.withLock {
-            cacheFailureIfNeededLocked(result)
-            failureCacheMissGroup = nil
-            ownedMissGroup?.leave()
-        }
-        return result
-    }
-
-    private static func cacheFailureIfNeededLocked(_ result: ApproovTokenFetchResult) {
-        let status = result.status
-        switch status {
-        case .noNetwork, .poorNetwork, .mitmDetected, .noApproovService:
-            cachedFailureResult = result
-            cachedFailureTime = ProcessInfo.processInfo.systemUptime
-            os_log("ApproovService: caching failure: %@", type: .debug, Approov.string(from: status))
-        default:
-            break
-        }
-    }
-
-    private static func cacheFailureIfNeeded(_ result: ApproovTokenFetchResult) {
-        failureCacheLock.withLock {
-            cacheFailureIfNeededLocked(result)
-        }
-    }
-
-    public static func setFailureCacheTTL(ttl: TimeInterval) {
-        failureCacheLock.withLock {
-            failureCacheTTL = ttl
-        }
-    }
-
     /**
      * Modern mutator-integrated updateRequestWithApproov method.
      */
@@ -672,7 +544,8 @@ public class ApproovService {
         }
 
         // Fetch an Approov token
-        let approovResult = fetchTokenWithFailureCache(url: url.absoluteString)
+        let approovResult = Approov.fetchTokenAndWait(url.absoluteString)
+        recordLastARC(approovResult)
         let hostname = url.host ?? ""
         if loggingLevel >= .info {
             os_log("ApproovService: updateRequest %@: %@", type: .info, hostname, approovResult.loggableToken())
@@ -732,6 +605,7 @@ public class ApproovService {
                 if ((value.hasPrefix(prefix)) && (value.count > prefix.count)) {
                     let lookupKey = String(value.dropFirst(prefix.count))
                     let approovResults = Approov.fetchSecureStringAndWait(lookupKey, nil)
+                    recordLastARC(approovResults)
                     if loggingLevel >= .info {
                         os_log("ApproovService: Substituting header: %@, %@", type: .info, header, Approov.string(from: approovResults.status))
                     }
@@ -775,6 +649,7 @@ public class ApproovService {
                     if let substringRange = Range(matchRange, in: updateURLString) {
                         let queryValue = String(updateURLString[substringRange])
                         let approovResults = Approov.fetchSecureStringAndWait(String(queryValue), nil)
+                        recordLastARC(approovResults)
                         if loggingLevel >= .info {
                             os_log("ApproovService: Attempting query parameter substitution: %@, %@", entry,
                                 Approov.string(from: approovResults.status))
@@ -983,6 +858,7 @@ public class ApproovService {
             throw ApproovError.permanentError(message: "fetchToken: SDK not initialized")
         }
         let result = Approov.fetchTokenAndWait(url)
+        recordLastARC(result)
         if loggingLevel >= .debug {
             os_log("ApproovService: fetchToken: %@", type: .debug, Approov.string(from: result.status))
         }
@@ -1049,6 +925,7 @@ public class ApproovService {
         }
         let type = newDef != nil ? "definition" : "lookup"
         let approovResult = Approov.fetchSecureStringAndWait(key, newDef)
+        recordLastARC(approovResult)
         if loggingLevel >= .info {
             os_log("ApproovService: fetchSecureString: %@: %@", type: .info, type, Approov.string(from: approovResult.status))
         }
@@ -1067,6 +944,7 @@ public class ApproovService {
             throw ApproovError.permanentError(message: "fetchCustomJWT: SDK not initialized")
         }
         let approovResult = Approov.fetchCustomJWTAndWait(payload)
+        recordLastARC(approovResult)
         if loggingLevel >= .info {
             os_log("ApproovService: fetchCustomJWT: %@", type: .info, Approov.string(from: approovResult.status))
         }
@@ -1085,6 +963,7 @@ public class ApproovService {
             throw ApproovError.permanentError(message: "precheck: SDK not initialized")
         }
         let approovResults = Approov.fetchSecureStringAndWait("precheck-dummy-key", nil)
+        recordLastARC(approovResults)
         if approovResults.status == ApproovTokenFetchStatus.unknownKey {
             if loggingLevel >= .debug {
                 os_log("ApproovService: precheck: success", type: .debug)
@@ -1100,28 +979,20 @@ public class ApproovService {
     }
 
     /**
-     * Gets the last ARC (Attestation Response Code) code.
+     * Records the ARC of a fetch result as the most recent one. An empty ARC clears the earlier value,
+     * because the ARC belongs to the last fetch.
+     */
+    private static func recordLastARC(_ result: ApproovTokenFetchResult) {
+        stateLock.withLock { _lastARC = result.arc }
+    }
+
+    /**
+     * Gets the Attestation Response Code (ARC) of the most recent token, secure string or custom JWT fetch
+     * that this layer made, for a request or for a direct method. It makes no fetch of its own (SPEC 5.3).
+     * It returns an empty string if there was no fetch since initialization, if the last fetch had no ARC,
+     * or if ARC is not enabled for the account.
      */
     public static func getLastARC() -> String {
-        if !isApproovEnabled() {
-            logApproovUnavailable("getLastARC")
-            return ""
-        }
-        guard let approovPins = Approov.getPins("public-key-sha256") else {
-            if loggingLevel >= .error {
-                os_log("ApproovService: no host pinning information available", type: .error)
-            }
-            return ""
-        }
-        if let hostname = approovPins.keys.first(where: { $0 != "*" }) {
-            let result = Approov.fetchTokenAndWait(hostname)
-            if result.token.count > 0 {
-                return result.arc
-            }
-        }
-        if loggingLevel >= .info {
-            os_log("ApproovService: ARC code unavailable", type: .info)
-        }
-        return ""
+        stateLock.withLock { _lastARC }
     }
 }

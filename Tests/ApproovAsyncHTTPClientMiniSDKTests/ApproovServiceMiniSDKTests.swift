@@ -452,6 +452,21 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(result.token.isEmpty)
     }
 
+    func testGetLastARCMakesNoFetchAndReturnsTheLastFetchARC() throws {
+        try reinitializeServiceWithTargetHost()
+        XCTAssertEqual(ApproovService.getLastARC(), "", "no fetch since initialization")
+
+        MiniSDKAttesterProxyController.clearCallLog()
+        _ = ApproovService.getLastARC()
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog(), [], "getLastARC must not fetch (SPEC 5.3)")
+
+        setDirective("""
+            { "operation": "fetchApproovToken", "response": { "status": "REJECTED", "arc": "TESTARC123" } }
+            """)
+        XCTAssertThrowsError(try ApproovService.fetchToken(url: targetURLString))
+        XCTAssertEqual(ApproovService.getLastARC(), "TESTARC123")
+    }
+
     // MARK: - §3 Service Mutators & Decision Overrides
 
     struct AlwaysProceedMutator: ApproovServiceMutator {
@@ -899,136 +914,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // MARK: - §7 Failure Caching
-
-    func testCachedFailureShortCircuitsSDKFetchWithinTTL() throws {
-        try reinitializeServiceWithTargetHost()
-
-        setDirective(
-            """
-            {
-              "operation": "fetchApproovToken",
-              "response": {
-                "status": "NO_NETWORK"
-              }
-            }
-            """
-        )
-
-        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
-        let appReq = ApproovRequest(url: request.url, method: request.method.rawValue, headers: request.headers, body: nil)
-        let response1 = ApproovService.updateRequestWithApproov(request: appReq)
-        XCTAssertEqual(response1.decision, .ShouldRetry)
-        XCTAssertEqual(response1.sdkMessage, "no network")
-
-        setDirective(
-            """
-            {
-              "operation": "fetchApproovToken",
-              "response": {
-                "status": "SUCCESS",
-                "token": "fresh-token-that-should-be-ignored"
-              }
-            }
-            """
-        )
-
-        let response2 = ApproovService.updateRequestWithApproov(request: appReq)
-        XCTAssertEqual(response2.decision, .ShouldRetry)
-        XCTAssertEqual(response2.sdkMessage, "no network")
-    }
-
-    func testCachedFailureShortCircuitsConcurrentRequestsWithinTTL() throws {
-        try reinitializeServiceWithTargetHost()
-
-        setDirective(
-            """
-            {
-              "operation": "fetchApproovToken",
-              "response": {
-                "status": "NO_NETWORK"
-              }
-            }
-            """
-        )
-
-        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
-        let appReq = ApproovRequest(url: request.url, method: request.method.rawValue, headers: request.headers, body: nil)
-        let requestCount = 24
-        let startGate = DispatchSemaphore(value: 0)
-        let completionGroup = DispatchGroup()
-        let responsesLock = NSLock()
-        var responses: [ApproovUpdateResponse] = []
-
-        for _ in 0..<requestCount {
-            completionGroup.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                startGate.wait()
-                let response = ApproovService.updateRequestWithApproov(request: appReq)
-                responsesLock.lock()
-                responses.append(response)
-                responsesLock.unlock()
-                completionGroup.leave()
-            }
-        }
-
-        for _ in 0..<requestCount {
-            startGate.signal()
-        }
-
-        switch completionGroup.wait(timeout: .now() + 5.0) {
-        case .success:
-            break
-        case .timedOut:
-            XCTFail("Timed out waiting for concurrent cached-failure requests")
-            return
-        }
-
-        XCTAssertEqual(responses.count, requestCount)
-        for response in responses {
-            XCTAssertEqual(response.decision, .ShouldRetry)
-            XCTAssertEqual(response.sdkMessage, "no network")
-        }
-    }
-
-    func testCachedFailureExpiresAfterTTL() throws {
-        try reinitializeServiceWithTargetHost()
-
-        setDirective(
-            """
-            {
-              "operation": "fetchApproovToken",
-              "response": {
-                "status": "NO_NETWORK"
-              }
-            }
-            """
-        )
-
-        let request = try HTTPClient.Request(url: targetURLString, method: .GET)
-        let appReq = ApproovRequest(url: request.url, method: request.method.rawValue, headers: request.headers, body: nil)
-        let response1 = ApproovService.updateRequestWithApproov(request: appReq)
-        XCTAssertEqual(response1.decision, .ShouldRetry)
-        XCTAssertEqual(response1.sdkMessage, "no network")
-
-        setDirective(
-            """
-            {
-              "operation": "fetchApproovToken",
-              "response": {
-                "status": "SUCCESS",
-                "token": "fresh-token-after-ttl"
-              }
-            }
-            """
-        )
-
-        Thread.sleep(forTimeInterval: 1.0)
-
-        let response2 = ApproovService.updateRequestWithApproov(request: appReq)
-        XCTAssertEqual(response2.decision, .ShouldProceed)
-        XCTAssertEqual(response2.sdkMessage, "success")
-    }
+    // MARK: - §7 Reinitialization
 
     func testInitializeWithEmptyConfigAfterValidConfigIsIgnored() throws {
         // Initialized with valid config
