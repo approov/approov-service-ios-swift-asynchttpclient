@@ -473,12 +473,12 @@ public class ApproovService {
      * @throws ApproovError for a decision of the standard mutators, or a URLError for a hook or configuration error
      */
     public static func signRequest(_ request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let bodyData = extractBodyData(from: request.body)
+        // The body closure runs here only if the mutator gets the body, for a body digest.
         let approovReq = ApproovRequest(
             url: request.url,
             method: request.method.rawValue,
             headers: request.headers,
-            body: bodyData
+            bodyProvider: { ApproovService.extractBodyData(from: request.body) }
         )
         let response = updateRequestWithApproov(request: approovReq)
         if let error = response.error {
@@ -515,9 +515,10 @@ public class ApproovService {
      * called. A write from another thread, or after this function returned, is ignored, and the body is
      * not digested.
      *
-     * The closure runs one more time when AsyncHTTPClient sends the request. AsyncHTTPClient also runs it
-     * again for a 307 or 308 redirect. So the closure must be repeatable: each call must write the same
-     * bytes.
+     * The layer calls this function only when it computes a body digest. Without a body digest, only
+     * AsyncHTTPClient calls the closure, for the send. With a body digest, the closure runs one more time
+     * when AsyncHTTPClient sends the request. AsyncHTTPClient also runs it again for a 307 or 308 redirect.
+     * So with a body digest the closure must be repeatable: each call must write the same bytes.
      *
      * - Parameter body: the request body to inspect.
      * - Returns: the complete body bytes if they arrived synchronously; otherwise nil.

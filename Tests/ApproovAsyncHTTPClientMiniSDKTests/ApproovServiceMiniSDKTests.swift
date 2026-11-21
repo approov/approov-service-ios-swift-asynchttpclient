@@ -1627,6 +1627,81 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNil(ApproovService.extractBodyData(from: nil))
     }
 
+    func testBodyIsNotReadWhenNoBodyDigestIsComputed() throws {
+        try reinitializeServiceWithTargetHost()
+        // A one-shot source with a known length: it has the bytes only on the first call.
+        let calls = NIOLockedValueBox(0)
+        let body = HTTPClient.Body.stream(length: 5) { writer in
+            let first = calls.withLockedValue { count -> Bool in
+                count += 1
+                return count == 1
+            }
+            return writer.write(.byteBuffer(ByteBuffer(string: first ? "hello" : "")))
+        }
+        let request = try HTTPClient.Request(url: targetURLString, method: .POST, body: body)
+        let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
+        defer { try? client.syncShutdown() }
+        // The default mutator does not sign, so nothing needs the body bytes before the send.
+        XCTAssertNoThrow(try client.execute(request: request).wait())
+        XCTAssertEqual(calls.withLockedValue { $0 }, 1, "the layer must not call the body closure before the send")
+    }
+
+    func testSignRequestDoesNotReadBodyWithoutBodyDigest() throws {
+        try reinitializeServiceWithTargetHost()
+        let calls = NIOLockedValueBox(0)
+        let body = HTTPClient.Body.stream(length: 5) { writer in
+            calls.withLockedValue { $0 += 1 }
+            return writer.write(.byteBuffer(ByteBuffer(string: "hello")))
+        }
+        let request = try HTTPClient.Request(url: targetURLString, method: .POST, body: body)
+        // The default mutator does not sign, so signRequest has no use for the body bytes.
+        let signed = try ApproovService.signRequest(request)
+        XCTAssertNotNil(signed.headers.first(name: "Approov-Token"))
+        XCTAssertEqual(calls.withLockedValue { $0 }, 0, "signRequest must not call the body closure without a body digest")
+    }
+
+    func testBodyDigestReadsBodyOnceBeforeTheSend() throws {
+        try reinitializeServiceWithTargetHost()
+        let factory = try ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
+            .setBodyDigestConfig(ApproovDefaultMessageSigning.DIGEST_SHA256, required: true)
+        ApproovService.setServiceMutator(ApproovDefaultMessageSigning().setDefaultFactory(factory))
+        // A repeatable source: each call writes the same bytes.
+        let calls = NIOLockedValueBox(0)
+        let body = HTTPClient.Body.stream(length: 5) { writer in
+            calls.withLockedValue { $0 += 1 }
+            return writer.write(.byteBuffer(ByteBuffer(string: "hello")))
+        }
+        let request = try HTTPClient.Request(url: targetURLString, method: .POST, body: body)
+
+        let reply = fetchNetworkReply(for: request)
+
+        let expected = Data(SHA256.hash(data: Data("hello".utf8))).base64EncodedString()
+        XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), "sha-256=:\(expected):")
+        let signatureInput = try XCTUnwrap(getHeader(from: reply, key: "Signature-Input"))
+        XCTAssertTrue(signatureInput.contains("content-digest"), signatureInput)
+        XCTAssertEqual(calls.withLockedValue { $0 }, 2, "one call for the body digest and one call for the send")
+    }
+
+    func testApproovRequestBodyProviderIsEvaluatedAtMostOnce() throws {
+        let calls = NIOLockedValueBox(0)
+        let url = try XCTUnwrap(URL(string: "https://example.com/path"))
+        let request = ApproovRequest(url: url, method: "POST", headers: HTTPHeaders(), bodyProvider: {
+            calls.withLockedValue { $0 += 1 }
+            return Data("hello".utf8)
+        })
+        XCTAssertEqual(calls.withLockedValue { $0 }, 0, "creating the request must not read the body")
+
+        var copy = request
+        XCTAssertEqual(copy.body, Data("hello".utf8))
+        XCTAssertEqual(request.body, Data("hello".utf8))
+        XCTAssertEqual(calls.withLockedValue { $0 }, 1, "copies share one read")
+
+        copy.body = Data("other".utf8)
+        XCTAssertEqual(copy.body, Data("other".utf8))
+        XCTAssertEqual(request.body, Data("hello".utf8), "a set changes only that copy")
+        XCTAssertEqual(calls.withLockedValue { $0 }, 1)
+    }
+
     func testExtractBodyDataLateWriteDoesNotUseEmbeddedEventLoop() throws {
         let producerGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? producerGroup.syncShutdownGracefully() }

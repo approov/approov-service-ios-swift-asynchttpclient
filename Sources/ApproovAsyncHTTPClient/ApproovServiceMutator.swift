@@ -25,13 +25,55 @@ public struct ApproovRequest {
     public var url: URL
     public var method: String
     public var headers: HTTPHeaders
-    public var body: Data?
+
+    // The body bytes. The layer reads them only when something gets `body`, for example a body digest.
+    private var bodyStorage: ApproovRequestBody
+
+    /// The body bytes, or nil if the request has no body or its body cannot be read in memory.
+    public var body: Data? {
+        get { bodyStorage.value() }
+        set { bodyStorage = ApproovRequestBody(value: newValue) }
+    }
 
     public init(url: URL, method: String, headers: HTTPHeaders, body: Data? = nil) {
         self.url = url
         self.method = method
         self.headers = headers
-        self.body = body
+        self.bodyStorage = ApproovRequestBody(value: body)
+    }
+
+    /// Creates a request whose body bytes come from `bodyProvider` on the first get of `body`. The provider runs
+    /// at most once. Copies of the request that are made before a set of `body` share that one result.
+    init(url: URL, method: String, headers: HTTPHeaders, bodyProvider: @escaping () -> Data?) {
+        self.url = url
+        self.method = method
+        self.headers = headers
+        self.bodyStorage = ApproovRequestBody(provider: bodyProvider)
+    }
+}
+
+/// Holds the body bytes of an `ApproovRequest`. It calls the provider at most once and keeps the result.
+private final class ApproovRequestBody {
+    private let lock = NSLock()
+    private var provider: (() -> Data?)?
+    private var data: Data?
+
+    init(value: Data?) {
+        self.data = value
+    }
+
+    init(provider: @escaping () -> Data?) {
+        self.provider = provider
+    }
+
+    func value() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let provider = provider {
+            self.provider = nil
+            data = provider()
+        }
+        return data
     }
 }
 

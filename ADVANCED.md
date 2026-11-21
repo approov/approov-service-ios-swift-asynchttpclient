@@ -84,6 +84,8 @@ See [Installation Message Signing](https://approov.io/docs/latest/approov-usage-
 * a SHA-256 `Content-Digest` of the body, when the body is in memory (a buffer, bytes or a string). A streamed body is not digested.
 * a `created` time and a 15 second `expires`, both from `ApproovService.getServerAdjustedCurrentTimeMS()`, so they follow the Approov servers' clock, also when the device clock is wrong. If the Approov SDK does not give that time, the device clock is used and a warning is logged.
 
+The package reads the body before the send only to compute the body digest. With a body digest, the closure of an `HTTPClient.Body.stream(length:)` body runs one more time, so each call must write the same bytes. Without a body digest, the package does not call the body closure.
+
 ### How the URL is signed
 
 `@target-uri` is the URL that the request was made with, without the fragment. AsyncHTTPClient sends that URL as written. `@path` is `/` when the URL has no path. `@authority` is the lowercase host, with the port only when it is not the default port.

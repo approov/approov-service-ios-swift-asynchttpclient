@@ -485,13 +485,12 @@ public class ApproovHTTPClient {
                 "Request TLS configuration for \(request.url.host ?? ""): certificateVerification must be "
                 + ".fullVerification, because Approov pinning does not run otherwise")
         }
-        let bodyData = ApproovService.extractBodyData(from: request.body)
-        
+        // The body closure runs before the send only if the mutator gets the body, for a body digest.
         let approovReq = ApproovRequest(
             url: request.url,
             method: request.method.rawValue,
             headers: request.headers,
-            body: bodyData
+            bodyProvider: { ApproovService.extractBodyData(from: request.body) }
         )
         
         let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
@@ -598,7 +597,7 @@ extension ApproovHTTPClient {
             url: url,
             method: request.method.rawValue,
             headers: request.headers,
-            body: extractBodyData(from: request.body)
+            bodyProvider: { ApproovHTTPClient.extractBodyData(from: request.body) }
         )
         
         let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
@@ -620,6 +619,8 @@ extension ApproovHTTPClient {
         }
     }
 
+    /// Gets the body bytes of an in-memory or repeatable body, for a body digest. The layer calls this function
+    /// only when it computes a body digest. It does not read a one-shot or streaming body.
     private static func extractBodyData(from body: HTTPClientRequest.Body?) -> Data? {
         guard let body = body else { return nil }
         let mirror = Mirror(reflecting: body)
@@ -663,8 +664,8 @@ extension ApproovHTTPClient {
                 }
             }
         }
-        // Either a one-shot/streaming body (correctly skipped) or the AsyncHTTPClient body layout
-        // changed and reflection no longer matches. In both cases no body digest will be generated.
+        // The body is one-shot or streaming, and this function does not read it. Or the AsyncHTTPClient
+        // body layout changed and reflection does not match it. In both cases the layer makes no body digest.
         return nil
     }
 }
