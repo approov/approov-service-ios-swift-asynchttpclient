@@ -1,541 +1,407 @@
 # Reference
 
-The public methods of `ApproovService`, the `ApproovHTTPClient` client, and the classes that you use with them. Import the module:
+This provides a reference for the public methods and properties defined on `ApproovService` and the types exposed by the Approov Service for AsyncHTTPClient. These are available when you import the module:
 
 ```swift
 import ApproovAsyncHTTPClient
 ```
 
-The direct methods throw an `ApproovError` on failure. Its cases:
+Most methods either throw an `ApproovError` or return an `ApproovUpdateResponse`. The error cases to be aware of are:
 
-- `networkingError`: a temporary networking problem. Offer a retry.
-- `rejectionError`: attestation was rejected. It carries the ARC and the rejection reasons when they are enabled.
-- `permanentError`, `configurationError`, `initializationFailure`, `pinningError`, `runtimeError`: not retryable in normal flows.
+- `networkingError`: A temporary networking issue; offer a retry.
+- `rejectionError`: Attestation rejected; includes ARC and rejection reasons if enabled.
+- `permanentError` / `configurationError` / `initializationFailure`: Non-retryable in normal flows.
 
-What a request fails with is in [errors your app can see](ADVANCED.md#errors-your-app-can-see).
+---
 
-# ApproovService
+## ApproovService
 
-## setLoggingLevel
+### initialize(config:comment:)
+Initializes the SDK with the config obtained using `approov sdk -getConfigString` or in the original onboarding email. In the vast majority of integrations, `initialize` should be called **once** during app startup. Each successful call resets all service-layer configuration (substitution headers, exclusion URL regexes, binding header, service mutator, `useApproovStatusIfNoToken`) to defaults.
 
-```swift
-static func setLoggingLevel(_ level: ApproovLogLevel)
-```
-
-Sets the level of the lines that the package logs: `.off`, `.error`, `.warning`, `.info` (the default) or `.debug`. Each `initialize` keeps it. `ApproovLogLevel` is the type of the level.
-
-## initialize
+The native SDK (3.5+) accepts a same-config re-initialization by returning `false`/`NO` without error, which this service layer handles gracefully. However, calling `initialize` again with the same config still resets the service-layer state, so there is no benefit to doing so in normal app flows with a single service layer.
 
 ```swift
-static func initialize(config: String, comment: String? = nil) throws
+try ApproovService.initialize(config: "<config-string>")
 ```
 
-Initializes the package with your Approov account ID (see [about the Approov account ID](ADVANCED.md#about-the-approov-account-id)). `""` starts bypass mode, in which requests go out without Approov protection. A second `initialize` with the same account ID is ignored. Each `initialize` that is not ignored resets the configuration to its defaults. `comment` is passed to the SDK. Throws `ApproovError.initializationFailure` if the value is not a complete, unaltered account ID, or if the SDK is already initialized with a different one.
-
-## isInitialized
+An optional `comment` parameter is forwarded directly to the native SDK. The `comment` should be `nil` unless you are using SDK initialization options or performing an explicit SDK reinitialization (e.g. `"options:no-install-key"` or `"reinit"`).
 
 ```swift
-static func isInitialized() -> Bool
+try ApproovService.initialize(config: "<config-string>", comment: "options:no-install-key")
 ```
 
-True after an `initialize` succeeded, bypass mode included.
+If an attempt is made to initialize with a **different** non-empty config, an `ApproovError.initializationFailure` is raised.
 
-## isApproovEnabled
+Passing an empty config string bypasses Approov SDK initialization. In that mode, the service layer still reports itself as initialized, but requests are forwarded as plain `HTTPClient` traffic without Approov token injection, message signing, secure strings, or pinning. A later call to `initialize()` with a valid non-empty config string will then enable the native Approov SDK at runtime.
+
+### isInitialized()
+Returns whether the service layer has been initialized.
 
 ```swift
-static func isApproovEnabled() -> Bool
+let initialized = ApproovService.isInitialized()
 ```
 
-True when the package is initialized with an account ID, so that Approov protection is active.
-
-## isApproovServiceEnabled
+### isApproovServiceEnabled() / isApproovProtectionEnabled()
+`isApproovServiceEnabled()` returns true once any `initialize` succeeded, bypass mode included. `isApproovProtectionEnabled()` returns true once the Approov SDK is initialized and Approov protection is active.
 
 ```swift
-static func isApproovServiceEnabled() -> Bool
+let serviceEnabled = ApproovService.isApproovServiceEnabled()
+let protectionEnabled = ApproovService.isApproovProtectionEnabled()
 ```
 
-True after an `initialize` succeeded, bypass mode included: the package processes requests. The same as `isInitialized()`.
-
-## isApproovProtectionEnabled
+### isApproovEnabled()
+Returns whether Approov protection is currently enabled (initialized with a valid, non-empty configuration string).
 
 ```swift
-static func isApproovProtectionEnabled() -> Bool
+let enabled = ApproovService.isApproovEnabled()
 ```
 
-True when Approov protection is active. The same as `isApproovEnabled()`. Check it after `initialize` before you treat Approov as active.
-
-## bindHeader
+### bindHeader
+Sets a binding header that must be present on all requests using the Approov service. A hash of the header value is supplied to Approov so the issued token is bound to the value.
 
 ```swift
-static var bindHeader: String
+ApproovService.bindHeader = "Authorization"
+let header = ApproovService.bindHeader
 ```
 
-The name of a header whose value the token is bound to, such as `"Authorization"`. `""` (the default) binds nothing. See [token binding](ADVANCED.md#token-binding).
+> **Important:** Automatic token binding (via `bindHeader`) and manual token binding (via `setDataHashInToken`) must **not** be mixed. Use one mechanism or the other. When `bindHeader` is set, the service layer reads that header from each outgoing request and supplies its hash to Approov, which will overwrite any value set manually with `setDataHashInToken`.
 
-## setTokenHeader
+### setTokenHeader(header:prefix:) / getTokenHeader() / getTokenPrefix()
+Sets the header that carries the Approov token, and an optional prefix such as `"Bearer "`. The default is `Approov-Token` with no prefix.
 
 ```swift
-static func setTokenHeader(header: String, prefix: String?)
+ApproovService.setTokenHeader(header: "Authorization", prefix: "Bearer ")
+let header = ApproovService.getTokenHeader()
+let prefix = ApproovService.getTokenPrefix()
 ```
 
-Sets the name of the token header (default `Approov-Token`) and a prefix for its value (default none), such as `"Authorization"` and `"Bearer "`.
-
-## getTokenHeader
+### setTraceIDHeader(header:) / getTraceIDHeader()
+Sets the header that carries the Approov trace ID. `nil` turns it off.
 
 ```swift
-static func getTokenHeader() -> String
+ApproovService.setTraceIDHeader(header: nil)
+let traceHeader = ApproovService.getTraceIDHeader()
 ```
 
-Returns the name of the token header.
-
-## getTokenPrefix
+### approovTokenHeaderAndPrefix
+Sets the header that the Approov token is added on, as well as an optional prefix String (such as "Bearer "). By default the token is provided on "Approov-Token" with no prefix.
 
 ```swift
-static func getTokenPrefix() -> String
+ApproovService.approovTokenHeaderAndPrefix = (
+    approovTokenHeader: "Approov-Token",
+    approovTokenPrefix: ""
+)
 ```
 
-Returns the prefix of the token header value, `""` when there is none.
-
-## setTraceIDHeader
+### getApproovTokenHeader()
+Returns the name of the header used to carry the Approov token.
 
 ```swift
-static func setTraceIDHeader(header: String?)
+let header = ApproovService.getApproovTokenHeader()
 ```
 
-Sets the name of the trace header (default `Approov-TraceID`). `nil` turns the trace header off.
-
-## getTraceIDHeader
+### setApproovTraceIDHeader(header:)
+Sets the header name used to carry the optional Approov TraceID. Pass `nil` to disable.
 
 ```swift
-static func getTraceIDHeader() -> String?
+ApproovService.setApproovTraceIDHeader(header: "Approov-TraceID")
+ApproovService.setApproovTraceIDHeader(header: nil)
 ```
 
-Returns the name of the trace header, or `nil` when it is off.
-
-## setUseApproovStatusIfNoToken
+### getApproovTraceIDHeader()
+Returns the configured TraceID header name, or `nil` if disabled.
 
 ```swift
-static func setUseApproovStatusIfNoToken(shouldUse: Bool)
+let header = ApproovService.getApproovTraceIDHeader()
 ```
 
-When true, a request that proceeds without a token carries the token fetch status name in the token header. Default false. See [sending the status in the token header](ADVANCED.md#sending-the-status-in-the-token-header).
-
-## getUseApproovStatusIfNoToken
+### setUseApproovStatusIfNoToken(shouldUse:)
+Sets a flag indicating if the Approov fetch status (e.g. `NO_NETWORK`, `MITM_DETECTED`) should be used as the token header value if the actual token fetch fails or returns an empty token.
 
 ```swift
-static func getUseApproovStatusIfNoToken() -> Bool
+ApproovService.setUseApproovStatusIfNoToken(shouldUse: true)
 ```
 
-Returns the value set with `setUseApproovStatusIfNoToken`.
-
-## setServiceMutator
+### getUseApproovStatusIfNoToken()
+Returns the current setting for using the Approov status if no token is available.
 
 ```swift
-static func setServiceMutator(_ mutator: ApproovServiceMutator?)
+let shouldUse = ApproovService.getUseApproovStatusIfNoToken()
 ```
 
-Sets the service mutator, which makes the package's decisions. `nil` sets the default, `CLOSE_FAILURE`. A request keeps the mutator that it started with. See [service mutators](ADVANCED.md#service-mutators).
+### setLoggingLevel(_:)
+Sets the service-layer logging level. This controls the verbosity of unified logging (`os_log`) output generated internally by the package.
 
-## getServiceMutator
+Available levels: `.off`, `.error`, `.warning`, `.info`, `.debug`.
 
 ```swift
-static func getServiceMutator() -> ApproovServiceMutator
+ApproovService.setLoggingLevel(.debug)
 ```
 
-Returns the current service mutator.
-
-## approovConfigString
+### setServiceMutator(_:)
+Installs a service mutator to customize behavior at key points in the service flow. Pass `nil` to restore the default, `CLOSE_FAILURE`. `ALWAYS_PROCEED` sends each request, with an empty token header (or the status) when there is no token. A request keeps the mutator that it started with.
 
 ```swift
-static var approovConfigString: String? { get }
+ApproovService.setServiceMutator(myMutator)
+ApproovService.setServiceMutator(.ALWAYS_PROCEED)
+ApproovService.setServiceMutator(nil)
 ```
 
-The Approov account ID that the package was initialized with, `""` in bypass mode, or `nil` before initialization.
-
-## setDevKey
+### getServiceMutator()
+Returns the currently active service mutator.
 
 ```swift
-static func setDevKey(devKey: String)
+let mutator = ApproovService.getServiceMutator()
 ```
 
-Sets a development key, so that a debug build of the app passes attestation. See [using a development key](https://approov.io/docs/latest/approov-usage-documentation/#using-a-development-key).
-
-## signRequest
+### setDevKey(devKey:)
+Sets a development key indicating that the app is a development version.
 
 ```swift
-static func signRequest(_ request: HTTPClient.Request) throws -> HTTPClient.Request
+ApproovService.setDevKey(devKey: "<dev-key>")
 ```
 
-Returns a protected copy of a request, for a transport that owns its own `HTTPClient` and cannot use `ApproovHTTPClient`. A request that Approov does not apply to comes back unchanged. Create that client with `redirectConfiguration: .disallow`: a plain `HTTPClient` follows a redirect with this protection, also to another host. Throws `ApproovError` for a decision of the standard mutators (`networkingError` for a retry), a `URLError` that your mutator threw, and `URLError(.unknown)` for another hook failure or a configuration error. Catch `Error`.
-
-## updateRequestWithApproov
+### updateRequest(url:headers:)
+Updates a URL and `HTTPHeaders` collection with Approov protection and secure string substitutions. This is a synchronous blocking method.
 
 ```swift
-static func updateRequestWithApproov(request: ApproovRequest) -> ApproovUpdateResponse
+let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: url, headers: headers)
 ```
 
-Protects an `ApproovRequest` and returns the result: the protected request, the decision (`ApproovFetchDecision`), the SDK status message, and the error for a decision to fail or retry. It does not throw. A request that the package already protected is first put back as the app wrote it.
+> **Note:** This legacy convenience overload only carries a URL and headers. It assumes the `GET` method and no body. If you use a custom service mutator that performs message signing, prefer `signRequest(_:)` or the `ApproovHTTPClient` execute path so the actual method and body are available for the signature base.
 
-## addSubstitutionHeader
+### signRequest(_:)
+Convenience method that applies Approov protection to a `HTTPClient.Request` and returns the protected request directly. Note: This method is synchronous and may block briefly.
 
 ```swift
-static func addSubstitutionHeader(header: String, prefix: String?)
+let protectedRequest = try ApproovService.signRequest(originalRequest)
 ```
 
-Names a header whose value, after `prefix`, is a secure string key. The package replaces the key with the secure string. See [secure strings](ADVANCED.md#secure-strings).
+> **Important: Dynamic Pinning:** `signRequest` does **not** apply dynamic TLS pinning. When you use `ApproovHTTPClient`, the client automatically validates TLS certificates using the `ApproovPinningVerifier`. A plain `HTTPClient` bypasses this. If you use `signRequest` with your own client, you are responsible for certificate pinning verification separately.
 
-## removeSubstitutionHeader
+### updateRequestWithApproov(request:)
+Updates an `ApproovRequest` with Approov protection (token, substitutions, etc.) and returns an `ApproovUpdateResponse` describing the decision and any error.
 
 ```swift
-static func removeSubstitutionHeader(header: String)
+let response = ApproovService.updateRequestWithApproov(request: request)
 ```
 
-Removes a header added with `addSubstitutionHeader`.
-
-## getSubstitutionHeaders
+### addSubstitutionHeader(header:prefix:)
+Adds a header name to be subject to secure string substitution.
 
 ```swift
-static func getSubstitutionHeaders() -> Dictionary<String, String>
+ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
 ```
 
-Returns the substitution headers and their prefixes.
-
-## addSubstitutionQueryParam
+### removeSubstitutionHeader(header:)
+Removes a header previously added for substitution.
 
 ```swift
-static func addSubstitutionQueryParam(key: String)
+ApproovService.removeSubstitutionHeader(header: "Api-Key")
 ```
 
-Names a query parameter whose value is a secure string key. The package replaces each occurrence with the secure string.
-
-## removeSubstitutionQueryParam
+### getSubstitutionHeaders()
+Returns the dictionary of headers currently subject to secure string substitution.
 
 ```swift
-static func removeSubstitutionQueryParam(key: String)
+let headers = ApproovService.getSubstitutionHeaders()
 ```
 
-Removes a query parameter added with `addSubstitutionQueryParam`.
-
-## getSubstitutionQueryParams
+### addSubstitutionQueryParam(key:)
+Adds a query parameter key name to be subject to secure string substitution.
 
 ```swift
-static func getSubstitutionQueryParams() -> Set<String>
+ApproovService.addSubstitutionQueryParam(key: "api_key")
 ```
 
-Returns the substitution query parameters.
-
-## addExclusionURLRegex
+### removeSubstitutionQueryParam(key:)
+Removes a query parameter key name previously added.
 
 ```swift
-static func addExclusionURLRegex(urlRegex: String)
+ApproovService.removeSubstitutionQueryParam(key: "api_key")
 ```
 
-Sends requests whose URL matches the regular expression without Approov processing. Their connections are still validated. A pattern that does not compile is logged as an error and not added.
-
-## removeExclusionURLRegex
+### getSubstitutionQueryParams()
+Returns the set of query parameter keys subject to secure string substitution.
 
 ```swift
-static func removeExclusionURLRegex(urlRegex: String)
+let params = ApproovService.getSubstitutionQueryParams()
 ```
 
-Removes a pattern added with `addExclusionURLRegex`.
-
-## getExclusionURLRegexs
+### addExclusionURLRegex(urlRegex:)
+Adds an exclusion URL regular expression. Matching URLs bypass all Approov processing.
 
 ```swift
-static func getExclusionURLRegexs() -> Dictionary<String, NSRegularExpression>
+ApproovService.addExclusionURLRegex(urlRegex: "^https://example\\.com/unprotected/.*$")
 ```
 
-Returns the exclusion patterns.
-
-## getDeviceID
+### removeExclusionURLRegex(urlRegex:)
+Removes a previously added exclusion URL regular expression.
 
 ```swift
-static func getDeviceID() -> String?
+ApproovService.removeExclusionURLRegex(urlRegex: "^https://example\\.com/unprotected/.*$")
 ```
 
-Returns the Approov device ID of this installation, or `nil` when Approov protection is not active.
-
-## setDataHashInToken
+### getExclusionURLRegexs()
+Returns the current dictionary of exclusion URL regexes.
 
 ```swift
-static func setDataHashInToken(data: String)
+let regexs = ApproovService.getExclusionURLRegexs()
 ```
 
-Binds the next tokens to a hash of `data`. Do not mix it with `bindHeader`.
-
-## fetchToken
+### getDeviceID()
+Gets the device ID used by Approov.
 
 ```swift
-static func fetchToken(url: String) throws -> String
+let deviceId = ApproovService.getDeviceID()
 ```
 
-Fetches an Approov token for `url` and returns it. Throws `ApproovError`: `networkingError` for a retry, `rejectionError` for a rejection, `permanentError` for other failures and before initialization.
-
-## setInstallAttributes
+### setDataHashInToken(data:)
+Directly sets the data hash for subsequently fetched Approov tokens. This is the manual alternative to `bindHeader`; the two must not be mixed (see the note on `bindHeader`).
 
 ```swift
-static func setInstallAttributes(_ attrs: String) throws
+ApproovService.setDataHashInToken(data: "<data-to-hash>")
 ```
 
-Sets the install attributes that the next tokens carry. Throws `ApproovError.permanentError` when Approov protection is not active. `setInstallAttrsInToken(attrs:)` is the 3.5.x name of the same method, and it throws the same.
-
-## getAccountMessageSignature
+### fetchToken(url:)
+Performs a token fetch for the given URL. Throws `ApproovError` if the fetch fails.
 
 ```swift
-static func getAccountMessageSignature(message: String) -> String?
+let token = try ApproovService.fetchToken(url: "https://example.com/api")
 ```
 
-Returns the base64 account signature of `message`, or `nil` when the account signing key is not available.
-
-## getInstallMessageSignature
+### setInstallAttributes(_:)
+Sets the install attributes to include in the Approov token. It is the same as `setInstallAttrsInToken(attrs:)`.
 
 ```swift
-static func getInstallMessageSignature(message: String) -> String?
+try ApproovService.setInstallAttributes("{\"plan\":\"pro\"}")
 ```
 
-Returns the base64 install signature of `message`, or `nil` when the install key is not available.
-
-## fetchSecureString
+### getServerAdjustedCurrentTimeMS()
+Returns the current time in milliseconds, adjusted to the Approov servers' clock by the SDK.
 
 ```swift
-static func fetchSecureString(key: String, newDef: String?) throws -> String?
+let now = try ApproovService.getServerAdjustedCurrentTimeMS()
 ```
 
-Fetches the secure string for `key`. With `newDef`, it sets a value for this installation, and `""` removes it. Returns `nil` when the key has no value. Throws `ApproovError`, as `fetchToken` does.
-
-## fetchCustomJWT
+### setInstallAttrsInToken(attrs:)
+Sets installation-specific attributes in the token.
 
 ```swift
-static func fetchCustomJWT(payload: String) throws -> String
+try ApproovService.setInstallAttrsInToken(attrs: "my-attributes")
 ```
 
-Fetches a custom JWT with the JSON `payload`. Throws `ApproovError`, as `fetchToken` does.
-
-## precheck
+### getAccountMessageSignature(message:)
+Gets the signature for the given message using the account-specific HMAC-SHA256 signing key.
 
 ```swift
-static func precheck() throws
+let signature = ApproovService.getAccountMessageSignature(message: "message")
 ```
 
-Checks whether the app passes attestation, without a token fetch for an API. Use it during development. Throws `ApproovError`: `rejectionError` with the ARC on a rejection, `networkingError` for a retry, `permanentError` otherwise.
-
-## getLastARC
+### getInstallMessageSignature(message:)
+Gets the signature for the given message using the install-specific signing key.
 
 ```swift
-static func getLastARC() -> String
+let signature = ApproovService.getInstallMessageSignature(message: "message")
 ```
 
-Returns the Attestation Response Code of the last fetch that the package made, or `""`. It makes no fetch of its own.
+### getMessageSignature(message:)
+*OBSOLETE* Use `getAccountMessageSignature` or `getInstallMessageSignature` instead.
 
-## getServerAdjustedCurrentTimeMS
+### fetchSecureString(key:newDef:)
+Fetches a secure string with the given key.
 
 ```swift
-static func getServerAdjustedCurrentTimeMS() throws -> Int64
+let value = try ApproovService.fetchSecureString(key: "api_key", newDef: nil)
 ```
 
-Returns the current time in milliseconds, adjusted to the Approov servers' clock. If the SDK does not give that time, it returns the device clock and logs one warning. Throws `ApproovError.permanentError` when Approov protection is not active.
-
-## Deprecated
-
-| Deprecated | Use |
-|---|---|
-| `static var loggingLevel: ApproovLogLevel` | `setLoggingLevel(_:)` |
-| `static var approovTokenHeaderAndPrefix` | `setTokenHeader(header:prefix:)`, `getTokenHeader()`, `getTokenPrefix()` |
-| `static func getApproovTokenHeader() -> String` | `getTokenHeader()` |
-| `static func setApproovTraceIDHeader(header: String?)` | `setTraceIDHeader(header:)` |
-| `static func getApproovTraceIDHeader() -> String?` | `getTraceIDHeader()` |
-| `static func getMessageSignature(message: String) -> String?` | `getAccountMessageSignature(message:)`, which it returns |
-| `static func updateRequest(url: URL, headers: HTTPHeaders) throws -> (URL, HTTPHeaders)` | `ApproovHTTPClient`. A plain `HTTPClient` follows a redirect with the protection that it adds. |
-
-# ApproovHTTPClient
-
-A wrapper for AsyncHTTPClient's `HTTPClient`, with the same methods. It protects each request with Approov before the request is sent.
-
-## init
+### fetchCustomJWT(payload:)
+Fetches a custom JWT with the given payload.
 
 ```swift
-convenience init(eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider,
-                 configuration: HTTPClient.Configuration = HTTPClient.Configuration())
-required init(eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider,
-              configuration: HTTPClient.Configuration = HTTPClient.Configuration(),
-              backgroundActivityLogger: Logger)
+let jwt = try ApproovService.fetchCustomJWT(payload: "{\"claims\":{}}")
 ```
 
-Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`, and keep `certificateVerification` at `.fullVerification`. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](ADVANCED.md#connection-validation) and [redirects](ADVANCED.md#redirects).
-
-## get, post, patch, put, delete
+### precheck()
+Performs a precheck to verify if the app will pass attestation. Internally this performs a secure string fetch with an `UNKNOWN_KEY`, which is treated as a success path. This is intended for **development-time** verification of an integration; it is not required in production flows. Throws `ApproovError` (e.g. `rejectionError` if the app fails attestation).
 
 ```swift
-func get(url: String, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func post(url: String, body: HTTPClient.Body? = nil, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func patch(url: String, body: HTTPClient.Body? = nil, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func put(url: String, body: HTTPClient.Body? = nil, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func delete(url: String, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
+try ApproovService.precheck()
 ```
 
-Each has a second form with a `logger: Logger` parameter.
-
-## execute
+### getLastARC()
+Gets the last Attestation Response Code.
 
 ```swift
-func execute(_ method: HTTPMethod = .GET, url: String, body: HTTPClient.Body? = nil,
-             deadline: NIODeadline? = nil, logger: Logger? = nil) -> EventLoopFuture<HTTPClient.Response>
-func execute(_ method: HTTPMethod = .GET, socketPath: String, urlPath: String, body: HTTPClient.Body? = nil,
-             deadline: NIODeadline? = nil, logger: Logger? = nil) -> EventLoopFuture<HTTPClient.Response>
-func execute(_ method: HTTPMethod = .GET, secureSocketPath: String, urlPath: String, body: HTTPClient.Body? = nil,
-             deadline: NIODeadline? = nil, logger: Logger? = nil) -> EventLoopFuture<HTTPClient.Response>
-func execute(request: HTTPClient.Request, deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func execute(request: HTTPClient.Request, eventLoop: HTTPClient.EventLoopPreference,
-             deadline: NIODeadline? = nil) -> EventLoopFuture<HTTPClient.Response>
-func execute<Delegate: HTTPClientResponseDelegate>(request: HTTPClient.Request, delegate: Delegate,
-             deadline: NIODeadline? = nil) -> ApproovHTTPClient.Task<Delegate, Delegate.Response>
-func execute<Delegate: HTTPClientResponseDelegate>(request: HTTPClient.Request, delegate: Delegate,
-             eventLoop: HTTPClient.EventLoopPreference, deadline: NIODeadline? = nil)
-             -> ApproovHTTPClient.Task<Delegate, Delegate.Response>
-func execute(_ request: HTTPClientRequest, deadline: NIODeadline, logger: Logger? = nil) async throws -> HTTPClientResponse
-func execute(_ request: HTTPClientRequest, timeout: TimeAmount, logger: Logger? = nil) async throws -> HTTPClientResponse
+let arc = ApproovService.getLastARC()
 ```
 
-The `HTTPClient.Request` forms also have a form with a `logger` parameter. A delegate gets only the final response of a redirect chain. The async forms do the Approov work off the Swift concurrency pool, and all the hops of one request share one deadline.
+---
 
-## shutdown, syncShutdown
+## ApproovHTTPClient
+
+An `ApproovHTTPClient` manages the underlying `HTTPClient` and automatically injects Approov tokens, processes secure string substitutions, and validates connections using `ApproovPinningVerifier`.
+
+### init(eventLoopGroupProvider:configuration:)
+Creates an instance of `ApproovHTTPClient`.
 
 ```swift
-func shutdown(queue: DispatchQueue = .global(), _ callback: @escaping (Error?) -> Void)
-func syncShutdown() throws
+let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
 ```
 
-Shut down the client, and its event loop group if the client created it.
+Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`. Keep `certificateVerification` at `.fullVerification`, and do not set a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](USAGE.md#connection-validation) and [redirects](USAGE.md#redirects).
 
-## ApproovHTTPClient.Task
+### get / post / patch / put / delete
+Convenience HTTP verbs returning `EventLoopFuture<HTTPClient.Response>`.
+
+### execute(...)
+Executes a request using custom `HTTPClient.Request` objects or custom delegates.
+
+### shutdown(queue:_:) / syncShutdown()
+Initiates shutdown of the client.
 
 ```swift
-final class Task<Delegate: HTTPClientResponseDelegate, Response>
+try client.syncShutdown()
 ```
 
-Returned by the `execute` forms with a delegate.
-
-- `eventLoop: EventLoop`: the event loop of the delegate.
-- `futureResult: EventLoopFuture<Delegate.Response>`: completes with the delegate's response, or the error.
-- `wait() throws -> Delegate.Response`: waits for `futureResult`.
-- `cancel()`: cancels the request, also between redirect hops.
-- `runInBackground()`: `ApproovHTTPClient` calls it to start the request. Do not call it: a second call sends the request again.
-
-## ApproovHTTPClient.EventLoopPreference
-
-```swift
-struct EventLoopPreference
-```
-
-The wrapper for `HTTPClient.EventLoopPreference`. `indifferent`, `delegate(on:)` and `delegateAndChannel(on:)` make a preference. `init(_ httpClientPreference: HTTPClient.EventLoopPreference)` maps the AsyncHTTPClient form, and keeps its event loop. `httpClientEventLoopPreference` maps it back. `preference` holds the `Preference` enum (`indifferent`, `delegate(on:)`, `delegateAndChannel(on:)`).
-
-# Extension classes
-
-## ApproovServiceMutator
-
-```swift
-protocol ApproovServiceMutator
-```
-
-Implement it to change the package's decisions. Each hook has a default, which makes the `CLOSE_FAILURE` decision: `handlePrecheckResult`, `handleFetchTokenResult`, `handleFetchSecureStringResult`, `handleFetchCustomJWTResult`, `handleInterceptorShouldProcessRequest`, `handleInterceptorFetchTokenResult`, `handleInterceptorHeaderSubstitutionResult`, `handleInterceptorQueryParamSubstitutionResult`, `handleInterceptorProcessedRequest` and `handlePinningShouldProcessRequest`. See [service mutators](ADVANCED.md#service-mutators).
-
-## ApproovCloseFailureMutator
-
-```swift
-final class ApproovCloseFailureMutator: ApproovServiceMutator
-```
-
-The 3.5.x decisions. `ApproovCloseFailureMutator.CLOSE_FAILURE` and `.DEFAULT` are the instance. It is the default mutator.
-
-## ApproovAlwaysProceedMutator
-
-```swift
-final class ApproovAlwaysProceedMutator: ApproovServiceMutator
-```
-
-Sends each request, with an empty token header (or the status) when there is no token. `ApproovAlwaysProceedMutator.ALWAYS_PROCEED` is the instance. `setServiceMutator(.ALWAYS_PROCEED)` installs it.
-
-## ApproovServiceMutatorDefault
-
-```swift
-struct ApproovServiceMutatorDefault: ApproovServiceMutator
-```
-
-Deprecated. Its `shared` instance makes the `CLOSE_FAILURE` decisions. Use `ApproovCloseFailureMutator.CLOSE_FAILURE`.
-
-## ApproovRequest
-
-```swift
-struct ApproovRequest
-```
-
-The request that the package and the mutator hooks work on: `url`, `method`, `headers` and `body` (`Data?`), and `init(url:method:headers:body:)`.
-
-## ApproovUpdateResponse
-
-```swift
-struct ApproovUpdateResponse
-```
-
-The result of `updateRequestWithApproov`: `request`, `decision`, `sdkMessage` and `error`, each `public internal(set)`.
-
-## ApproovFetchDecision
-
-```swift
-enum ApproovFetchDecision
-```
-
-`ShouldProceed` (send the protected request), `ShouldRetry` (a network failure the user can retry), `ShouldFail` (do not send the request) and `ShouldIgnore` (send the request unchanged).
-
-## ApproovRequestMutations
-
-```swift
-class ApproovRequestMutations
-```
-
-What the package changed on a request, given to `handleInterceptorProcessedRequest`: `getTokenHeaderKey()` and `setTokenHeaderKey(_:)`, `getTraceIDHeaderKey()` and `setTraceIDHeaderKey(_:)`, `getSubstitutionHeaderKeys()` and `setSubstitutionHeaderKeys(_:)`, `getOriginalURL()`, `getSubstitutionQueryParamKeys()`, and `setSubstitutionQueryParamResults(originalURL:substitutionQueryParamKeys:)`. A header or query parameter is listed as substituted only when it got a real secure string.
+---
 
 ## ApproovDefaultMessageSigning
 
-```swift
-class ApproovDefaultMessageSigning: ApproovServiceMutator
-```
+A service mutator that signs requests that carry the Approov token header. See [message signing](USAGE.md#message-signing).
 
-The message signer, a service mutator with the `CLOSE_FAILURE` decisions. See [message signing](ADVANCED.md#message-signing).
-
-- `init()`, then `setDefaultFactory(_:)` for every protected host, and `putHostFactory(hostName:factory:)` for one host.
-- `static func generateDefaultSignatureParametersFactory(baseParametersOverride: SignatureParameters? = nil) -> SignatureParametersFactory`: the default factory.
-- `handleInterceptorProcessedRequest(_:changes:)` signs the request. `handleInterceptorFetchTokenResult(_:url:)` makes the `CLOSE_FAILURE` decision. `processedRequest(_:changes:)` is deprecated: use `handleInterceptorProcessedRequest`.
-- Constants: `DIGEST_SHA256` (`"sha-256"`), `DIGEST_SHA512` (`"sha-512"`), `ALG_ES256` (`"ecdsa-p256-sha256"`, the install signature) and `ALG_HS256` (`"hmac-sha256"`, the account signature).
+- `init()`: creates a signer with no factory.
+- `setDefaultFactory(_:)`: the factory for each protected host without its own factory.
+- `putHostFactory(hostName:factory:)`: the factory for one host.
+- `generateDefaultSignatureParametersFactory(baseParametersOverride:)`: a factory with the default settings: install signature, `created`, a 15 second `expires`, and a SHA-256 body digest.
 
 ## SignatureParametersFactory
 
-```swift
-class SignatureParametersFactory
-```
+Each method returns the factory, so calls can be chained.
 
-Builds the signature parameters for each request. Each method returns the factory, so that you can chain them.
+- `setUseInstallMessageSigning()`, `setUseAccountMessageSigning()`, `setUseInstallAndAccountMessageSigning()`: select the signatures.
+- `setBodyDigestConfig(_:required:)`: the body digest algorithm, `DIGEST_SHA256`, `DIGEST_SHA512` or `nil` for none. With `required: true`, a body that cannot be digested fails the request. It throws for an unsupported algorithm.
+- `setAddCreated(_:)` and `setExpiresLifetime(_:)`: the `created` and `expires` signature parameters.
+- `setAddApproovTokenHeader(_:)` and `setAddApproovTraceIDHeader(_:)`: sign the token and trace headers.
+- `addOptionalHeaders(_:)`: headers to sign when they are present.
+- `setBaseParameters(_:)`: the base signature parameters.
 
-- `setBaseParameters(_:)`: the base components, `@method` and `@target-uri` by default.
-- `setBodyDigestConfig(_:required:) throws`: the body digest algorithm, or `nil` for none. Throws `ApproovError.permanentError` for an algorithm that is not `DIGEST_SHA256` or `DIGEST_SHA512`.
-- `setUseInstallMessageSigning()`, `setUseAccountMessageSigning()`, `setUseInstallAndAccountMessageSigning()`: the signatures to send.
-- `setAddCreated(_:)` and `setExpiresLifetime(_:)`: the `created` time, and the `expires` lifetime in seconds.
-- `setAddApproovTokenHeader(_:)` and `setAddApproovTraceIDHeader(_:)`: cover the token and trace headers.
-- `addOptionalHeaders(_:)`: headers to cover when they are present.
-
-## ApproovLogLevel
-
-```swift
-enum ApproovLogLevel: Int, Comparable
-```
-
-`off`, `error`, `warning`, `info` and `debug`, for `setLoggingLevel(_:)`.
+---
 
 ## ApproovPinningVerifier
 
+### verifyPinning(sec_protocol_metadata:)
+Static helper used internally by the client's TLS configuration. Returns a boolean indicating if pinning check passed.
+
 ```swift
-static func verifyPinning(sec_protocol_metadata: sec_protocol_metadata_t) -> Bool
+let isPinned = ApproovPinningVerifier.verifyPinning(sec_protocol_metadata: metadata)
 ```
 
-The connection validation that the package installs in AsyncHTTPClient. An app does not call it.
+### Dynamic Pinning Behavior
+
+Approov pins are evaluated by the verifier **once per TLS handshake**. On each new connection the verifier calls `Approov.getPins("public-key-sha256")` to obtain the current pin set, so any dynamic pin update delivered by the Approov SDK takes effect immediately for **every connection established after the update**. If the presented certificate chain does not match the current pins, the handshake fails and that connection is never used.
+
+Pins are matched against the certificate chain that the operating system actually validated (the path built to a trusted anchor), not the raw chain presented by the server. Extra certificates a peer includes that are not part of the validated path cannot satisfy a pin.
+
+> **Note: pooled connections and pin updates:** `ApproovHTTPClient` reuses the connection pool managed by the underlying `HTTPClient`. Because pinning is enforced at handshake time, a connection that was already open and validated under a previous pin set continues to serve requests until it is closed and re-established (for example when it idles out of the pool or the server closes it). New pins are therefore guaranteed to be enforced on all *new* connections immediately, but an existing pooled connection may continue to be used briefly after a pin update. Applications that require all in-flight connections to re-pin immediately after a dynamic update should create a fresh `ApproovHTTPClient` (and shut down the previous one), which forces every subsequent connection to re-handshake under the current pins.
