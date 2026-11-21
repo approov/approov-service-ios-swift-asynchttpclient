@@ -18,11 +18,11 @@ import AsyncHTTPClient
 
 // Initialize the Approov service. Initialization can fail (bad config / SDK error), so guard it
 // and fall back to bypass mode (empty config) rather than letting the app crash. See the README
-// "INITIALIZING APPROOV SERVICE" section for the full pattern (device-ID + session correlation logging).
+// "Initializing Approov Service" section for the full pattern.
 do {
     try ApproovService.initialize(config: "<config-string>")
 } catch {
-    // Continue UNPROTECTED: requests go out without Approov protection; the backend stays the enforcement point.
+    // Continue without protection. Requests go out without Approov protection, so the backend is the enforcement point.
     try? ApproovService.initialize(config: "")
 }
 
@@ -70,10 +70,10 @@ By default, the `ApproovService` processes requests based on the attestation sta
 | Approov Fetch Status | Action | Result |
 | :--- | :--- | :--- |
 | **Success** | Proceed | The request is sent with the configured Approov token header. |
-| **No Network / Poor Network / MITM Detected** | Throw Exception | An `ApproovError.networkingError` is thrown. The request is marked as `.ShouldRetry`. With `setUseApproovStatusIfNoToken(shouldUse: true)`, the request proceeds with the status name in the token header. |
+| **No Network / Poor Network / MITM Detected** | Fail | The request fails with `ApproovError.networkingError`. With `setUseApproovStatusIfNoToken(shouldUse: true)`, the request proceeds with the status name in the token header. |
 | **No Approov Service** | Proceed | The request is sent with an empty `Approov-Token` header. |
 | **Unknown URL / Unprotected URL** | Proceed | The request is sent **without** an `Approov-Token`. |
-| **Any other status, such as Rejected** | Throw Exception | An `ApproovError.permanentError` is thrown. The request is marked as `.ShouldFail`. |
+| **Any other status, such as Rejected** | Fail | The request fails with `ApproovError.permanentError`. |
 
 This default is the `CLOSE_FAILURE` mutator. A failed token fetch only affects requests to your Approov API domains. A request to any other host is sent unchanged. To send every request and let your backend decide, install the `ALWAYS_PROCEED` mutator:
 
@@ -134,7 +134,7 @@ final class MyMutator: ApproovServiceMutator {
 
 It is possible to sign HTTP requests using Approov to ensure message integrity and authenticity. There are two types of message signing available:
 
-1.  **Installation Message Signing**: Uses an installation-specific key (held in the device's Secure Enclave) to sign requests. This provides strong non-repudiation as the signing key is unique to that specific installation and never leaves the device.
+1.  **Installation Message Signing**: Uses an installation-specific key to sign requests. The key is held in secure hardware where the device has it. The key is unique to the installation and does not leave the device.
 2.  **Account Message Signing**: Uses a shared account-specific secret key (HMAC-SHA256) to sign requests. This key is delivered to the SDK only upon successful attestation.
 
 The default mutator, `CLOSE_FAILURE`, does no message signing. Even if you install `ApproovDefaultMessageSigning`, a signature is only added when:
@@ -166,11 +166,32 @@ ApproovService.setServiceMutator(signer)
 
 ## Body Digest
 
-The default factory adds a SHA-256 `Content-Digest` of the request body to the signature. To compute it, the package reads the body before the send. The closure of an `HTTPClient.Body.stream(length:)` body then runs one more time, so each call must write the same bytes. Without a body digest, the package does not call the body closure. To turn the digest off:
+The default factory adds a SHA-256 `Content-Digest` of the request body to the signature. To compute it, the package reads the body before the send. The closure of an `HTTPClient.Body.stream(length:)` body then runs one more time, so each call must write the same bytes. Without a body digest, the package does not call the body closure before the send. To turn the digest off:
 
 ```swift
 let factory = try ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory()
     .setBodyDigestConfig(nil, required: false)
+```
+
+---
+
+# Secure Strings
+
+The package can replace a placeholder value in a header or a query parameter with a secure string from Approov. Add each header or query parameter that carries a placeholder. The package replaces the placeholder only on https to an Approov API domain. If the secure string fetch fails, the status name replaces the placeholder, such as `Api-Key: REJECTED`.
+
+```swift
+ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
+ApproovService.addSubstitutionQueryParam(key: "api_key")
+```
+
+---
+
+# Exclusions
+
+To send some requests without Approov processing, add a regular expression for their URLs. The package sends a request whose URL matches the expression unchanged.
+
+```swift
+ApproovService.addExclusionURLRegex(urlRegex: "^https://example\\.com/unprotected/.*$")
 ```
 
 ---

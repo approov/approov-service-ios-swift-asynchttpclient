@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
-## [3.5.4] - Unreleased
+## [3.5.4] - 2026-11-21
 
 Changes since 3.5.3. Entries marked **Breaking** need a source change.
 
