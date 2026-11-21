@@ -649,7 +649,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         ApproovService.setServiceMutator(ApproovAlwaysProceedMutator.ALWAYS_PROCEED)
         ApproovService.setServiceMutator(nil)
         XCTAssertTrue(ApproovService.getServiceMutator() is ApproovCloseFailureMutator, "nil restores DEFAULT")
-        XCTAssertTrue(ApproovCloseFailureMutator.DEFAULT is ApproovCloseFailureMutator, "DEFAULT is CLOSE_FAILURE in 3.7.0")
+        XCTAssertTrue(ApproovCloseFailureMutator.DEFAULT is ApproovCloseFailureMutator, "DEFAULT is CLOSE_FAILURE")
     }
 
     func testAlwaysProceedNeverThrowsATokenDecision() throws {
@@ -2148,7 +2148,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // MARK: - 3.7.0 Request Decisions
+    // MARK: - Request Decisions
 
     private func decide(_ url: String, tokenStatus: String? = nil, secureStringStatus: String? = nil,
                         mutator: ApproovServiceMutator? = nil, useStatus: Bool = false,

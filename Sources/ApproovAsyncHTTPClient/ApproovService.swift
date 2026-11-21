@@ -251,7 +251,7 @@ public class ApproovService {
 
             approovSDKInitialised = true
             if isEnabled {
-                Approov.setUserProperty("approov-service-asynchttpclient/3.7.0")
+                Approov.setUserProperty("approov-service-asynchttpclient/3.5.4")
             }
             TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
         }
@@ -1064,7 +1064,7 @@ public class ApproovService {
         log(.debug, "ApproovService: setInstallAttrsInToken")
     }
 
-    /** Sets the install attributes to include in the Approov token. The 3.7.x name of setInstallAttrsInToken. */
+    /** Sets the install attributes to include in the Approov token. The same as setInstallAttrsInToken. */
     public static func setInstallAttributes(_ attrs: String) throws {
         if !isApproovEnabled() {
             logApproovUnavailable("setInstallAttributes")

@@ -7,7 +7,7 @@ import PackageDescription
 // The version main is at. It must match the top CHANGELOG entry and the runtime user-property string in
 // ApproovService.swift. Bump all three (and add the CHANGELOG entry) in a PR. The "Release Current Main Branch"
 // workflow (release.yml) then tags main at this version.
-let releaseTAG = "3.7.0"
+let releaseTAG = "3.5.4"
 // SDK package version
 let sdkVersion: Version = "3.5.3"
 // NOTE: The useMiniSDK flag and miniSDKPath are used for local and CI automated testing only.

@@ -359,14 +359,14 @@ private func standardSubstitution(_ approovResults: ApproovTokenFetchResult) -> 
     return approovResults.status == .success
 }
 
-/// The 3.5.x token decisions. The default mutator in 3.7.0.
+/// The default token decisions. The default mutator.
 public final class ApproovCloseFailureMutator: ApproovServiceMutator, CustomStringConvertible {
     static let instance = ApproovCloseFailureMutator()
     private init() {}
     public var description: String { "ApproovServiceMutator.CLOSE_FAILURE" }
 }
 
-/// Never aborts a request: every failure status proceeds. Opt-in in 3.7.0.
+/// Never aborts a request: every failure status proceeds. Install it with setServiceMutator(.ALWAYS_PROCEED).
 public final class ApproovAlwaysProceedMutator: ApproovServiceMutator, CustomStringConvertible {
     static let instance = ApproovAlwaysProceedMutator()
     private init() {}
