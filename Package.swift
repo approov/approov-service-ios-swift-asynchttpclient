@@ -51,6 +51,13 @@ var packageTargets: [Target] = [
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOEmbedded", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+            .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            .product(name: "NIOHTTP1", package: "swift-nio"),
+            .product(name: "NIOTLS", package: "swift-nio"),
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            .product(name: "NIOHTTPCompression", package: "swift-nio-extras"),
+            .product(name: "Logging", package: "swift-log"),
             .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
             .product(name: "Approov", package: approovPackageName),
             .product(name: "RawStructuredFieldValues", package: "swift-http-structured-headers")
