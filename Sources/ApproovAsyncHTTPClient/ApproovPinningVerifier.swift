@@ -228,7 +228,7 @@ public class ApproovPinningVerifier {
             throw ApproovError.pinningError(message: "Approov SDK getPins() call failed")
         }
 
-        // SPEC 2.6: exact per host, without regard to case and one trailing dot, on the host and the keys.
+        // Exact per host, without regard to case and one trailing dot, on the host and the keys.
         // "*" is the Managed Trust Roots, never a pattern.
         let wanted = ApproovService.normalisedHost(host)
         guard var certHashesBase64 = approovCertHashes.first(where: { $0.key != "*" && ApproovService.normalisedHost($0.key) == wanted })?.value else {
@@ -238,7 +238,7 @@ public class ApproovPinningVerifier {
         if certHashesBase64.isEmpty {
             certHashesBase64 = approovCertHashes["*"] ?? []
             if certHashesBase64.isEmpty {
-                // SPEC 2.4, 2.6: no host pins and no Managed Trust Roots: OS trust, one warning per host and pin set
+                // No host pins and no Managed Trust Roots: OS trust, one warning per host and pin set
                 warnOfOSTrust(host: wanted, pins: approovCertHashes)
                 return true
             }
@@ -271,7 +271,7 @@ public class ApproovPinningVerifier {
     private static var warnedHosts: Set<String> = []
     private static var rejections: [String: TimeInterval] = [:]
 
-    /** Logs one warning per host while the pin set does not change (SPEC 2.6). The warning names the host, never a pin. */
+    /** Logs one warning per host while the pin set does not change. The warning names the host, never a pin. */
     private static func warnOfOSTrust(host: String, pins: [String: [String]]) {
         let firstTime = stateLock.withLock { () -> Bool in
             if warnedPins != pins {
@@ -287,7 +287,7 @@ public class ApproovPinningVerifier {
 
     /**
      * Maps a request failure to the platform pinning error when the verifier rejected the request's host after
-     * the request started (SPEC 2.3). A cancellation is never mapped. The original error is the underlying error.
+     * the request started. A cancellation is never mapped. The original error is the underlying error.
      */
     static func mapPinningFailure(_ error: Error, host: String?, since start: TimeInterval) -> Error {
         if let clientError = error as? HTTPClientError, clientError == .cancelled {

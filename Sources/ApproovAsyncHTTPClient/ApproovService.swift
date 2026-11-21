@@ -126,7 +126,7 @@ public class ApproovService {
     /** The mutator instance used to control ApproovService behavior at key points in the flow. */
     private static var _serviceMutator: ApproovServiceMutator = ApproovCloseFailureMutator.instance
 
-    /** The ARC of the most recent fetch the layer made, from the request path or a direct method (SPEC 5.3) */
+    /** The ARC of the most recent fetch the layer made, from the request path or a direct method */
     private static var _lastARC = ""
 
     /** True once the deprecated getMessageSignature has logged its warning in this process */
@@ -138,7 +138,7 @@ public class ApproovService {
     /** Lock for the logging level and the test log sink */
     private static let logLock = NIOLock()
 
-    /** Current logging level (SPEC 5.10); initialize never resets it */
+    /** Current logging level; initialize never resets it */
     private static var _logLevel: ApproovLogLevel = .info
 
     /** Receives every line that the layer writes, with its level. For tests only. */
@@ -161,7 +161,7 @@ public class ApproovService {
     }
 
     /**
-     * Sets the logging level of the layer (SPEC 5.10). Each level writes its own severity and the more severe
+     * Sets the logging level of the layer. Each level writes its own severity and the more severe
      * ones. OFF silences the layer. It can be called at any time, and initialize does not change it.
      */
     public static func setLoggingLevel(_ level: ApproovLogLevel) {
@@ -190,7 +190,7 @@ public class ApproovService {
 
     /**
      * Gets the form of a URL for a log line: scheme, host, port and path. It has no user info, query or
-     * fragment (SPEC 5.10).
+     * fragment.
      */
     static func loggableURL(_ url: URL) -> String {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -302,12 +302,12 @@ public class ApproovService {
         }
     }
 
-    /** True once any initialize has succeeded, bypass mode included: the layer processes requests (SPEC 5.7(c)) */
+    /** True once any initialize has succeeded, bypass mode included: the layer processes requests */
     public static func isApproovServiceEnabled() -> Bool {
         isInitialized()
     }
 
-    /** True once the Approov SDK is initialized and Approov protection is active (SPEC 5.7(c)) */
+    /** True once the Approov SDK is initialized and Approov protection is active */
     public static func isApproovProtectionEnabled() -> Bool {
         isApproovEnabled()
     }
@@ -358,7 +358,7 @@ public class ApproovService {
         }
     }
 
-    /** Sets the header that carries the Approov token, and an optional prefix such as "Bearer " (SPEC 5.1) */
+    /** Sets the header that carries the Approov token, and an optional prefix such as "Bearer " */
     public static func setTokenHeader(header: String, prefix: String?) {
         stateLock.withLock {
             _approovTokenHeader = header
@@ -375,7 +375,7 @@ public class ApproovService {
         stateLock.withLock { _approovTokenPrefix }
     }
 
-    /** Sets the header that carries the Approov trace ID. Nil disables it (SPEC 5.1). */
+    /** Sets the header that carries the Approov trace ID. Nil disables it. */
     public static func setTraceIDHeader(header: String?) {
         stateLock.withLock { _approovTraceIDHeader = header }
         log(.debug, "ApproovService: setTraceIDHeader: \(header ?? "nil")")
@@ -592,7 +592,7 @@ public class ApproovService {
     }
 
     /**
-     * Adds Approov protection to a request, as the service mutator decides (SPEC 1, 6).
+     * Adds Approov protection to a request, as the service mutator decides.
      */
     public static func updateRequestWithApproov(request: ApproovRequest) -> ApproovUpdateResponse {
         return updateRequestWithApproov(request: request, mutator: getServiceMutator(), substituteQuery: true)
@@ -600,9 +600,9 @@ public class ApproovService {
 
     /**
      * Adds Approov protection as the public form does. `mutator` is the one that the request started with, which
-     * decides every hop (SPEC 6.5). `substituteQuery` is false for a redirect hop whose URL is the server's
-     * `Location`: the layer never looks up the query values that the server sent (SPEC 7.3, T37-13a). A request
-     * that the layer already protected is first put back as the app wrote it (T37-38).
+     * decides every hop. `substituteQuery` is false for a redirect hop whose URL is the server's
+     * `Location`: the layer never looks up the query values that the server sent. A request
+     * that the layer already protected is first put back as the app wrote it.
      */
     static func updateRequestWithApproov(request: ApproovRequest, mutator: ApproovServiceMutator,
                                          substituteQuery: Bool) -> ApproovUpdateResponse {
@@ -624,7 +624,7 @@ public class ApproovService {
             return ApproovUpdateResponse(request: request, decision: .ShouldIgnore, sdkMessage: "", error: nil)
         }
 
-        // WebSockets are not supported (SPEC 2.7, T37-31). An upgrade request goes out as the app wrote it, with no
+        // WebSockets are not supported. An upgrade request goes out as the app wrote it, with no
         // token or secure string fetch. Its connection is still checked, because AsyncHTTPClient checks every one.
         let upgrades = request.headers["Upgrade"].flatMap { $0.split(separator: ",") }
         if upgrades.contains(where: { $0.trimmingCharacters(in: .whitespaces).lowercased() == "websocket" }) {
@@ -663,14 +663,14 @@ public class ApproovService {
 
         // A protected channel, which can carry secrets, is a token-protected API (SUCCESS) or a secrets-only API
         // (UNPROTECTED_URL) over https. Any other status but UNKNOWN_URL is a failure status, which says nothing
-        // about the host, so there the pin set decides (SPEC 1.3, 1.5).
+        // about the host, so there the pin set decides.
         let status = approovResult.status
         let isHTTPS = url.scheme?.lowercased() == "https"
         let isFailure = status != .success && status != .unprotectedURL && status != .unknownURL
         let isProtectedChannel = isHTTPS && (status == .success || status == .unprotectedURL)
 
         // A failure for a host that is not listed goes out untouched. A standard decision is ignored, and only the
-        // app's own throw aborts it (SPEC 1.3).
+        // app's own throw aborts it.
         if isFailure && !isListedHost(url.host) {
             do {
                 _ = try ApproovRequestPathError.callHookIgnoringStandardDecisions("handleInterceptorFetchTokenResult") {
@@ -707,7 +707,7 @@ public class ApproovService {
         }
 
         // The token and trace headers. After a failure the token header holds an empty token, or the status name
-        // with setUseApproovStatusIfNoToken (SPEC 1.3, 4.1).
+        // with setUseApproovStatusIfNoToken.
         if shouldAddToken && status != .unknownURL && status != .unprotectedURL {
             let (tokenHeader, tokenPrefix, useStatus, traceHeader) = stateLock.withLock {
                 (_approovTokenHeader, _approovTokenPrefix, _useApproovStatusIfNoToken, _approovTraceIDHeader)
@@ -737,7 +737,7 @@ public class ApproovService {
             }
         }
 
-        // Secure strings only on a protected channel (SPEC 1.4, 1.5).
+        // Secure strings only on a protected channel.
         if isProtectedChannel {
             do {
                 try substituteHeaders(&response.request, mutator: mutator, changes: changes)
@@ -761,7 +761,7 @@ public class ApproovService {
         return response
     }
 
-    /// True if the host is a key of the pins map other than "*" (SPEC 1.3), compared as pins are looked up.
+    /// True if the host is a key of the pins map other than "*", compared as pins are looked up.
     static func isListedHost(_ host: String?) -> Bool {
         guard let host = host, let pins = Approov.getPins("public-key-sha256") else {
             return false
@@ -770,7 +770,7 @@ public class ApproovService {
         return pins.keys.contains { $0 != "*" && normalisedHost($0) == wanted }
     }
 
-    /// A host as pins are looked up: lowercase, with one trailing dot removed (SPEC 2.6).
+    /// A host as pins are looked up: lowercase, with one trailing dot removed.
     static func normalisedHost(_ host: String) -> String {
         var normalised = host.lowercased()
         if normalised.hasSuffix(".") {
@@ -779,13 +779,13 @@ public class ApproovService {
         return normalised
     }
 
-    /// True if a header can carry the value unchanged: tab and printable ASCII only (SPEC 1.4).
+    /// True if a header can carry the value unchanged: tab and printable ASCII only.
     static func isHeaderCarriable(_ value: String) -> Bool {
         return value.unicodeScalars.allSatisfy { $0 == "\t" || ($0.value >= 0x20 && $0.value <= 0x7E) }
     }
 
     /// Logs a warning for each placeholder that stays on a request that is not https or whose token fetch
-    /// returned BAD_URL (SPEC 1.5). It names the header or query parameter, never a value.
+    /// returned BAD_URL. It names the header or query parameter, never a value.
     private static func warnOfPlaceholdersLeft(in request: ApproovRequest, isHTTPS: Bool, status: ApproovTokenFetchStatus) {
         guard !isHTTPS || status == .badURL else {
             return
@@ -1098,7 +1098,7 @@ public class ApproovService {
 
     /**
      * Gets the account message signature. A deprecated alias of getAccountMessageSignature: it returns the
-     * same value and logs a deprecation warning the first time it is called in the process (SPEC 5.2).
+     * same value and logs a deprecation warning the first time it is called in the process.
      */
     @available(*, deprecated, message: "Use getAccountMessageSignature or getInstallMessageSignature instead.")
     public static func getMessageSignature(message: String) -> String? {
@@ -1168,7 +1168,7 @@ public class ApproovService {
     }
 
     /**
-     * Gets the name of a fetch status as the Android SDK enum names it (SPEC 4.3). The iOS SDK gives only prose
+     * Gets the name of a fetch status as the Android SDK enum names it. The iOS SDK gives only prose
      * from Approov.string(from:), so the layer keeps this mirror. A status the mirror does not know keeps the
      * SDK prose.
      */
@@ -1203,7 +1203,7 @@ public class ApproovService {
 
     /**
      * Gets the Attestation Response Code (ARC) of the most recent token, secure string or custom JWT fetch
-     * that this layer made, for a request or for a direct method. It makes no fetch of its own (SPEC 5.3).
+     * that this layer made, for a request or for a direct method. It makes no fetch of its own.
      * It returns an empty string if there was no fetch since initialization, if the last fetch had no ARC,
      * or if ARC is not enabled for the account.
      */
@@ -1212,7 +1212,7 @@ public class ApproovService {
     }
 
     /**
-     * Gets the current time in milliseconds, adjusted to the Approov servers' clock by the SDK (SPEC 3.8). It
+     * Gets the current time in milliseconds, adjusted to the Approov servers' clock by the SDK. It
      * requires Approov protection, like the other direct methods.
      */
     public static func getServerAdjustedCurrentTimeMS() throws -> Int64 {
@@ -1225,7 +1225,7 @@ public class ApproovService {
 
     /**
      * The server adjusted time from the SDK, found at run time because SDK 3.5.3 does not have the method. If it
-     * is unavailable, the device clock is used and one warning is logged (SPEC 3.8).
+     * is unavailable, the device clock is used and one warning is logged.
      */
     static func serverAdjustedTimeMS() -> Int64 {
         let selector = NSSelectorFromString("getServerAdjustedCurrentTimeMS")

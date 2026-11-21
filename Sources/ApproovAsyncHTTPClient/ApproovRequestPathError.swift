@@ -19,7 +19,7 @@ import Foundation
 
 // ApproovRequestPathError creates the errors that a request fails with on the request path, other than the
 // standard decisions, which keep their ApproovError. Each one is a URLError, the platform network error, so
-// that the app's error handling sees an ordinary network failure (SPEC 1.6, 1.6.1).
+// that the app's error handling sees an ordinary network failure.
 enum ApproovRequestPathError {
     /// The error for a configuration error of the app, such as a required body digest that cannot be
     /// generated. It is logged. The message never quotes a value that could be a token or a secure string.
@@ -51,7 +51,7 @@ enum ApproovRequestPathError {
     }
 
     /// Calls a hook as callHook does, but ignores a standard decision, for a request where the standard
-    /// decisions do not apply (a failure status for a host that is not listed, SPEC 1.3).
+    /// decisions do not apply (a failure status for a host that is not listed).
     static func callHookIgnoringStandardDecisions<T>(_ hook: String, _ call: () throws -> T) throws -> T? {
         return try callHook(hook, { try call() as T? }, standardDecision: { _ in nil })
     }

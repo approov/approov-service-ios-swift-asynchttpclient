@@ -24,7 +24,7 @@ import NIOCore
 import NIOHTTP1
 
 /// The redirect settings of the app's `HTTPClient.Configuration`. The wrapped client never follows a redirect:
-/// `ApproovHTTPClient` follows it, so that it can protect each hop as a new request (SPEC 7.3).
+/// `ApproovHTTPClient` follows it, so that it can protect each hop as a new request.
 struct ApproovRedirectPolicy: Equatable {
     let max: Int
     let allowCycles: Bool
@@ -122,9 +122,9 @@ enum ApproovRedirects {
         return (nextMethod, nextHeaders, !toGET)
     }
 
-    /// The URL of the next hop and whether its query holds the app's own placeholders (SPEC 7.3). A target that is
+    /// The URL of the next hop and whether its query holds the app's own placeholders. A target that is
     /// the URL that was sent is the app's URL again. Any other target is used exactly as the server sent it, and
-    /// its query values are never looked up (T37-13a).
+    /// its query values are never looked up.
     static func nextURL(target: URL, wireURL: URL, appURL: URL, appQuery: Bool) -> (url: URL, appQuery: Bool) {
         if target.absoluteString == wireURL.absoluteString {
             return (appURL, appQuery)

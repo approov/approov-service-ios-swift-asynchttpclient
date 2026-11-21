@@ -103,7 +103,7 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         return try factory(for: provider)?.buildSignatureParameters(provider: provider, changes: changes)
     }
 
-    /** The CLOSE_FAILURE token decision, open for a subclass to change (SPEC 3.1). */
+    /** The CLOSE_FAILURE token decision, open for a subclass to change. */
     public func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
         return try ApproovCloseFailureMutator.CLOSE_FAILURE.handleInterceptorFetchTokenResult(approovResults, url: url)
     }
@@ -129,11 +129,11 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
     /**
      * Signs a request that carries the token header. Each selected signature is a member of one Signature and one
      * Signature-Input dictionary. A member that cannot be produced is left out; with no member, the request is
-     * sent unsigned and an error is logged (SPEC 3.5). An unsupported algorithm and a required body digest that
-     * cannot be generated fail the request (SPEC 1.7(a)).
+     * sent unsigned and an error is logged. An unsupported algorithm and a required body digest that
+     * cannot be generated fail the request.
      */
     func signedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
-        // Sign only a request that carries the token header the layer added (SPEC 3.1, 3.4)
+        // Sign only a request that carries the token header the layer added
         guard changes.getTokenHeaderKey() != nil else {
             return request
         }
@@ -378,7 +378,7 @@ public class SignatureParametersFactory {
         return self
     }
 
-    /** Selects the install signature only (SPEC 3.2). */
+    /** Selects the install signature only. */
     @discardableResult
     public func setUseInstallMessageSigning() -> SignatureParametersFactory {
         self.useInstallMessageSigning = true
@@ -386,7 +386,7 @@ public class SignatureParametersFactory {
         return self
     }
 
-    /** Selects the account signature only (SPEC 3.2). */
+    /** Selects the account signature only. */
     @discardableResult
     public func setUseAccountMessageSigning() -> SignatureParametersFactory {
         self.useInstallMessageSigning = false
@@ -394,7 +394,7 @@ public class SignatureParametersFactory {
         return self
     }
 
-    /** Selects both signatures, as two members of one Signature dictionary (SPEC 3.2). */
+    /** Selects both signatures, as two members of one Signature dictionary. */
     @discardableResult
     public func setUseInstallAndAccountMessageSigning() -> SignatureParametersFactory {
         self.useInstallMessageSigning = true
@@ -569,7 +569,7 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
     }
 
     public func getTargetUri() -> String {
-        // SPECIFICATION 3.3: the URL as the stack sends it. A fragment is never sent, so remove it.
+        // The URL as the stack sends it. A fragment is never sent, so remove it.
         let uri = request.url.absoluteString
         if let fragmentStart = uri.firstIndex(of: "#") {
             return String(uri[..<fragmentStart])

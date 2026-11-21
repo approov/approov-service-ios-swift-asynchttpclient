@@ -320,7 +320,7 @@ public extension ApproovServiceMutator {
         case .noNetwork,
              .poorNetwork,
              .mitmDetected:
-            // SPEC 4.2: with the status in the token header, network failures proceed, as in 3.5.8
+            // With the status in the token header, network failures proceed.
             if ApproovService.getUseApproovStatusIfNoToken() {
                 return true
             }
@@ -353,20 +353,20 @@ public extension ApproovServiceMutator {
     }
 }
 
-// A standard mutator never aborts a request because of a secure string (SPEC 6.2): SUCCESS substitutes, and the
+// A standard mutator never aborts a request because of a secure string: SUCCESS substitutes, and the
 // layer writes any other status into the placeholder.
 private func standardSubstitution(_ approovResults: ApproovTokenFetchResult) -> Bool {
     return approovResults.status == .success
 }
 
-/// The 3.5.x token decisions (SPEC 6.2). The default mutator in 3.7.0.
+/// The 3.5.x token decisions. The default mutator in 3.7.0.
 public final class ApproovCloseFailureMutator: ApproovServiceMutator, CustomStringConvertible {
     static let instance = ApproovCloseFailureMutator()
     private init() {}
     public var description: String { "ApproovServiceMutator.CLOSE_FAILURE" }
 }
 
-/// Never aborts a request: every failure status proceeds (SPEC 6.2). Opt-in in 3.7.0.
+/// Never aborts a request: every failure status proceeds. Opt-in in 3.7.0.
 public final class ApproovAlwaysProceedMutator: ApproovServiceMutator, CustomStringConvertible {
     static let instance = ApproovAlwaysProceedMutator()
     private init() {}
@@ -385,7 +385,7 @@ public final class ApproovAlwaysProceedMutator: ApproovServiceMutator, CustomStr
 
 public extension ApproovServiceMutator where Self == ApproovCloseFailureMutator {
     static var CLOSE_FAILURE: ApproovCloseFailureMutator { ApproovCloseFailureMutator.instance }
-    /// The out-of-the-box mutator: CLOSE_FAILURE in 3.7.0, planned to be ALWAYS_PROCEED in 4.0.0 (SPEC 5.5).
+    /// The out-of-the-box mutator: CLOSE_FAILURE.
     static var DEFAULT: ApproovServiceMutator { ApproovCloseFailureMutator.instance }
 }
 

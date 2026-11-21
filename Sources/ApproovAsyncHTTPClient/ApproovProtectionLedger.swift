@@ -22,7 +22,7 @@ import Foundation
 import NIOConcurrencyHelpers
 import NIOHTTP1
 
-/// What the layer installed on the requests it protected (T37-38, SPEC 7.3). A protected request that comes back
+/// What the layer installed on the requests it protected. A protected request that comes back
 /// to the layer, such as `signRequest` output passed to `ApproovHTTPClient`, is put back as the app wrote it before
 /// it is protected again. So a secure string is never looked up with a secret as its key, and the request carries
 /// one token header and one signature. The ledger keeps a SHA-256 digest of each installed value, never the value,

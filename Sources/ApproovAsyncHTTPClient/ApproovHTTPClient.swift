@@ -35,11 +35,11 @@ public class ApproovHTTPClient {
 
     let httpClientDelegate: HTTPClient
 
-    /// Why Approov pinning cannot run on this client, or nil when it can (D5).
+    /// Why Approov pinning cannot run on this client, or nil when it can.
     let pinningUnavailableReason: String?
 
     /// The app's redirect settings, or nil when the app disallows redirects. The wrapped client never follows a
-    /// redirect: this client follows it and protects each hop as a new request (D3, SPEC 7.3).
+    /// redirect: this client follows it and protects each hop as a new request.
     let redirectPolicy: ApproovRedirectPolicy?
 
     internal static let loggingDisabled = Logger(label: "ApproovHTTPClient-do-not-log",
@@ -91,7 +91,7 @@ public class ApproovHTTPClient {
         return false
     }
 
-    /// Fails a request when Approov protection is on and pinning cannot run on this client (D5, SPEC 1.7(a)).
+    /// Fails a request when Approov protection is on and pinning cannot run on this client.
     static func checkPinningAvailable(_ reason: String?) throws {
         if let reason, ApproovService.isApproovEnabled() {
             throw ApproovRequestPathError.configuration(reason)
@@ -530,7 +530,7 @@ extension ApproovHTTPClient {
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
         try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
-        // One request, one mutator (SPEC 6.5), and each hop is the app's request for its URL (SPEC 7.3).
+        // One request, one mutator, and each hop is the app's request for its URL.
         let mutator = ApproovService.getServiceMutator()
         var tracker = redirectPolicy.map { ApproovRedirectTracker(policy: $0, initialURL: request.url) }
         var hop = ApproovClientRequestHop(request: request, substituteQuery: true)
@@ -748,7 +748,7 @@ extension ApproovHTTPClient {
         }
 
         // Runs the request as a chain of hops. Each hop is the app's request for its URL, protected on a background
-        // thread as a new request, under the mutator that the request started with (SPEC 6.5, 7.3).
+        // thread as a new request, under the mutator that the request started with.
         public func runInBackground() {
             DispatchQueue.global(qos: .userInitiated).async {
                 let mutator = ApproovService.getServiceMutator()

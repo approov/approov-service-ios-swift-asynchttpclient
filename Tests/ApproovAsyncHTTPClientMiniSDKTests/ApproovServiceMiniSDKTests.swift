@@ -31,7 +31,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         super.tearDown()
     }
 
-    // MARK: - §1 Initialization
+    // MARK: - Initialization
 
     func testInitializeIgnoresSameConfigAndRejectsDifferentConfig() throws {
         XCTAssertNoThrow(try ApproovService.initialize(config: validInitialConfig, comment: nil))
@@ -146,7 +146,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertTrue(ApproovService.getExclusionURLRegexs().isEmpty)
         XCTAssertTrue(ApproovService.getServiceMutator() is ApproovCloseFailureMutator)
         XCTAssertEqual(ApproovService.getLastARC(), "")
-        XCTAssertEqual(ApproovService.logLevel, .warning, "initialize keeps the logging level (SPEC 5.10)")
+        XCTAssertEqual(ApproovService.logLevel, .warning, "initialize keeps the logging level")
         ApproovService.setLoggingLevel(.off)
     }
 
@@ -224,7 +224,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // MARK: - §2 Request Processing & Token Behaviors
+    // MARK: - Request Processing & Token Behaviors
 
     func testPrecheckTreatsUnknownKeyAsSuccess() throws {
         XCTAssertNoThrow(try ApproovService.precheck())
@@ -304,7 +304,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // SPEC 6.2 (3.7.0): NO_APPROOV_SERVICE proceeds to a listed host with an empty token header and the SDK
+    // NO_APPROOV_SERVICE proceeds to a listed host with an empty token header and the SDK
     // trace header, as evidence that Approov processing ran. Under 3.5.x it carried no Approov header.
     func testUpdateRequestNoApproovServiceProceedsWithEmptyToken() throws {
         try reinitializeServiceWithTargetHost()
@@ -355,7 +355,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.networkingError(message) = error else {
                 return XCTFail("Expected networkingError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchToken network error: NO_NETWORK")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertEqual(message, "fetchToken network error: NO_NETWORK")  // Status names, not SDK prose
         }
     }
 
@@ -486,7 +486,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.networkingError(message) = error else {
                 return XCTFail("Expected networkingError, got \(error)")
             }
-            XCTAssertTrue(message.contains("NO_NETWORK"), "Unexpected message: \(message)")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertTrue(message.contains("NO_NETWORK"), "Unexpected message: \(message)")  // Status names, not SDK prose
         }
     }
 
@@ -509,7 +509,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertTrue(message.contains("REJECTED"), "Unexpected message: \(message)")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertTrue(message.contains("REJECTED"), "Unexpected message: \(message)")  // Status names, not SDK prose
         }
     }
 
@@ -537,7 +537,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "The blocking Approov update ran on the Swift concurrency pool: \(label)")
     }
 
-    // T37-26: the mini SDK classifies hosts as the real SDK does.
+    // The mini SDK classifies hosts as the real SDK does.
 
     func testMiniSDKReportsUnknownURLForHostNotAdded() throws {
         try reinitializeServiceWithTargetHost()
@@ -582,7 +582,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
         MiniSDKAttesterProxyController.clearCallLog()
         _ = ApproovService.getLastARC()
-        XCTAssertEqual(MiniSDKAttesterProxyController.callLog(), [], "getLastARC must not fetch (SPEC 5.3)")
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog(), [], "getLastARC must not fetch")
 
         setDirective("""
             { "operation": "fetchApproovToken", "response": { "status": "REJECTED", "arc": "TESTARC123" } }
@@ -641,7 +641,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }, "a standard decision is ignored where the standard decisions do not apply")
     }
 
-    // MARK: - §3 Service Mutators & Decision Overrides
+    // MARK: - Service Mutators & Decision Overrides
 
     func testDefaultMutatorIsCloseFailure() throws {
         try reinitializeServiceWithTargetHost()
@@ -691,7 +691,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNil(getHeader(from: reply, key: "Approov-Token"))
     }
 
-    // MARK: - §4 Pinning Configuration & Scenarios
+    // MARK: - Pinning Configuration & Scenarios
 
     func testPinningFailsClosedWhenPinsAreUnavailable() throws {
         try reinitializeServiceWithTargetHost()
@@ -703,7 +703,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                                                                   verifyDate: pinningFixtureDate),
                          "control: with pins available the chain is checked without an error")
 
-        // SPEC 2.4: a layer that cannot read the pins fails the connection closed.
+        // A layer that cannot read the pins fails the connection closed.
         MiniSDKAttesterProxyController.setPinsUnavailable(true)
         defer { MiniSDKAttesterProxyController.setPinsUnavailable(false) }
         XCTAssertThrowsError(try ApproovPinningVerifier.verifyPinning(hostname: host, certChain: chain,
@@ -733,7 +733,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             """)
         let client = pinnedClient()
         defer { try? client.syncShutdown() }
-        // SPEC 2.3: the layer reports the pin rejection as URLError(.serverCertificateUntrusted).
+        // The layer reports the pin rejection as URLError(.serverCertificateUntrusted).
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
             XCTAssertEqual((error as? URLError)?.code, .serverCertificateUntrusted, "\(error)")
         }
@@ -809,7 +809,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         return (leaf, ca, try spkiPin(ca), try spkiPin(root))
     }
 
-    // T37-22: lookup ignores case and one trailing dot, on the host and on the key.
+    // Lookup ignores case and one trailing dot, on the host and on the key.
     func testPinLookupIgnoresCaseAndTrailingDot() throws {
         let f = try applePinFixture()
         try reinitializeServiceWithTargetHost(scenarioBody: """
@@ -823,7 +823,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "control: the normalised host still finds its pins")
     }
 
-    // T37-21: a listed host with no pins and an empty "*" connects on OS trust, with one warning per host.
+    // A listed host with no pins and an empty "*" connects on OS trust, with one warning per host.
     func testEmptyManagedTrustRootsFallBackToOSTrustWithOneWarning() throws {
         let f = try applePinFixture()
         try reinitializeServiceWithTargetHost(scenarioBody: """
@@ -878,7 +878,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // T37-12: cleartext is not blocked by pinning; the SDK answers BAD_URL and the mutator decides.
+    // Cleartext is not blocked by pinning; the SDK answers BAD_URL and the mutator decides.
     func testCleartextToAListedHostIsTheMutatorsDecision() throws {
         try reinitializeServiceWithTargetHost()
         let http = targetURLString.replacingOccurrences(of: "https://", with: "http://")
@@ -979,13 +979,13 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
         defer { try? client.syncShutdown() }
 
-        // SPEC 1.7(a): a configuration error on the request path is the network error, URLError(.unknown).
+        // A configuration error on the request path is the network error, URLError(.unknown).
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
             XCTAssertEqual((error as? URLError)?.code, .unknown, "\(error)")
         }
     }
 
-    // MARK: - §7 Redirects
+    // MARK: - Redirects
 
     func testRedirectPolicyIsReadFromTheConfiguration() {
         XCTAssertNil(ApproovRedirectPolicy.of(.disallow))
@@ -1079,7 +1079,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertTrue(same.substituteQuery)
         XCTAssertNotNil(same.request.body)
 
-        // Any other target is used exactly as the server sent it, and its query is never looked up (T37-13a).
+        // Any other target is used exactly as the server sent it, and its query is never looked up.
         let echoed = try XCTUnwrap(URL(string: "https://o.example/q?k=query-secret"))
         let other = try hop.following(status: .seeOther, to: echoed, wireURL: wire)
         XCTAssertEqual(other.request.url, echoed)
@@ -1110,7 +1110,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertFalse(ApproovRedirects.canBeSentAgain(.stream(AsyncStream<ByteBuffer> { $0.finish() }, length: .known(0))))
     }
 
-    // T37-38: a request that the layer already protected is put back as the app wrote it before it is protected
+    // A request that the layer already protected is put back as the app wrote it before it is protected
     // again. No secure string is fetched with a secret as its key, and it carries one token and one signature.
     func testProtectedRequestIsProtectedAgainFromThePlaceholders() throws {
         try secureStringScenario()
@@ -1133,7 +1133,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "a secret is never a key: \(calls)")
     }
 
-    // T37-38: signRequest output sent through ApproovHTTPClient is protected once, from the app's placeholders.
+    // signRequest output sent through ApproovHTTPClient is protected once, from the app's placeholders.
     func testSignRequestOutputThroughApproovHTTPClientIsProtectedOnce() throws {
         try secureStringScenario()
         ApproovService.setServiceMutator(signer())
@@ -1154,7 +1154,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         })
     }
 
-    // T37-13, T37-13a, T37-25: a redirect to another origin carries nothing that the layer added. The hop is a new
+    // A redirect to another origin carries nothing that the layer added. The hop is a new
     // request for its target, the target URL is used as the server sent it, and a query value from Location is
     // never looked up.
     func testRedirectToAnotherOriginCarriesNoProtection() throws {
@@ -1168,22 +1168,22 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             body: .string("payload"))
         MiniSDKAttesterProxyController.clearCallLog()
         let reply = try XCTUnwrap(fetchNetworkReply(for: request))
-        XCTAssertEqual(reply["url"] as? String, location, "T37-13a: the URL as the server sent it")
+        XCTAssertEqual(reply["url"] as? String, location, "the URL as the server sent it")
         XCTAssertEqual(reply["method"] as? String, "POST")
         XCTAssertEqual(reply["body"] as? String, "payload", "a 307 sends the body again")
         for name in ["Approov-Token", "Approov-TraceID", "Signature", "Signature-Input", "Content-Digest"] {
             XCTAssertNil(getHeader(from: reply, key: name), "\(name) must not reach another origin")
         }
-        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "T37-25: the placeholder as the app wrote it")
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "the placeholder as the app wrote it")
         XCTAssertNil(getHeader(from: reply, key: "Authorization"), "AsyncHTTPClient drops Authorization on another origin")
         let calls = MiniSDKAttesterProxyController.callLog()
         XCTAssertTrue(calls.contains { $0.hasPrefix("fetchApproovTokenAndWait:") && $0.contains("/redirect-to") }, "\(calls)")
         XCTAssertTrue(calls.contains("fetchSecureStringAndWait:header-key"), "the first hop was protected: \(calls)")
         XCTAssertTrue(calls.contains("fetchApproovTokenAndWait:\(location)"), "the hop is evaluated for its target: \(calls)")
-        XCTAssertFalse(calls.contains("fetchSecureStringAndWait:query-key"), "T37-13a: \(calls)")
+        XCTAssertFalse(calls.contains("fetchSecureStringAndWait:query-key"), "the query of the server's target is never looked up: \(calls)")
     }
 
-    // T37-13: a redirect to a second protected host fetches a token for the target and never carries the first one.
+    // A redirect to a second protected host fetches a token for the target and never carries the first one.
     func testRedirectToASecondProtectedHostFetchesItsOwnToken() throws {
         let first = try XCTUnwrap(URL(string: targetURLString)?.host)
         let second = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
@@ -1201,7 +1201,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNotNil(getHeader(from: reply, key: "Signature-Input"))
     }
 
-    // T37-13: a same-origin 303 is protected again and signed again over the new method and target.
+    // A same-origin 303 is protected again and signed again over the new method and target.
     func testSameOrigin303IsProtectedAgainAsGET() throws {
         try reinitializeServiceWithTargetHost()
         ApproovService.setServiceMutator(signer())
@@ -1246,7 +1246,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(heads, [200])
     }
 
-    // SPEC 6.5: the mutator that the request started with decides every hop, also after setServiceMutator.
+    // The mutator that the request started with decides every hop, also after setServiceMutator.
     func testOneMutatorDecidesEveryHop() throws {
         try reinitializeServiceWithTargetHost()
         let later = HopRecordingMutator()
@@ -1280,7 +1280,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // T37-13, T37-13a, T37-25 on the async API. A body that can be sent only once is not sent again.
+    // The same redirect rules on the async API. A body that can be sent only once is not sent again.
     func testAsyncAPIFollowsRedirectsAsNewRequests() throws {
         try redirectScenario()
         let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
@@ -1305,10 +1305,10 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }.get()
         XCTAssertEqual(followed.0, 200)
         let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: followed.1) as? [String: Any])
-        XCTAssertEqual(reply["url"] as? String, location, "T37-13a")
+        XCTAssertEqual(reply["url"] as? String, location, "the URL as the server sent it")
         XCTAssertEqual(reply["body"] as? String, "payload")
         XCTAssertNil(getHeader(from: reply, key: "Approov-Token"))
-        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "T37-25")
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "Bearer header-key", "the placeholder as the app wrote it")
         XCTAssertFalse(MiniSDKAttesterProxyController.callLog().contains("fetchSecureStringAndWait:query-key"))
 
         var streamed = request
@@ -1321,7 +1321,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(status, 307, "a body that can be sent only once is not sent again, as in AsyncHTTPClient")
     }
 
-    // T37-31, SPEC 2.7: WebSockets are not supported. An upgrade request goes out untouched, with no fetch.
+    // WebSockets are not supported. An upgrade request goes out untouched, with no fetch.
     func testWebSocketUpgradeIsForwardedUntouched() throws {
         try secureStringScenario()
         ApproovService.setServiceMutator(signer())
@@ -1336,7 +1336,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(MiniSDKAttesterProxyController.callLog().filter { $0.hasPrefix("fetch") }, [], "no fetch")
     }
 
-    // MARK: - §5 Message Signing
+    // MARK: - Message Signing
 
     func testAuthorityIsLowercaseWithANonDefaultPort() throws {
         func authority(_ url: String) throws -> String {
@@ -1367,7 +1367,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // SPEC 3.7, TR "Target URI Is The Wire URL": the signed @target-uri equals the URL the server receives.
+    // The signed @target-uri equals the URL the server receives.
     func testTargetURIIsTheWireURL() async throws {
         try reinitializeServiceWithTargetHost()
         let url = targetURLString + "/p/a%20b?q=x|y&s=%20&p=%25&n=\u{00E9}"
@@ -1388,7 +1388,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertEqual(recorder.signed.withLockedValue { $0 }, echo?["url"] as? String, "HTTPClientRequest API")
     }
 
-    // T37-08: a failure that proceeds to a listed host is signed over the token header as sent.
+    // A failure that proceeds to a listed host is signed over the token header as sent.
     func testFailureThatProceedsIsSigned() throws {
         try reinitializeServiceWithTargetHost()
         final class AlwaysProceedSigner: ApproovDefaultMessageSigning {
@@ -1400,7 +1400,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(response.request.headers.first(name: "Signature-Input")).contains("\"approov-token\""))
     }
 
-    // SPEC 3.1: a token header the app set itself is not the layer's, so it is not signed.
+    // A token header the app set itself is not the layer's, so it is not signed.
     func testAppSetTokenHeaderIsNotSigned() throws {
         let unprotected = try XCTUnwrap(URL(string: unprotectedURLString)?.host)
         try reinitializeServiceWithTargetHost(scenarioBody: "\"noApproovTokenDomains\": [\"\(unprotected)\"]")
@@ -1415,7 +1415,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         return ApproovDefaultMessageSigning().setDefaultFactory(factory)
     }
 
-    // T37-04, SPEC 3.6: the three out-of-the-box signing states.
+    // The three out-of-the-box signing states.
     func testSigningStates() throws {
         try reinitializeServiceWithTargetHost()
         XCTAssertNil(try decide(targetURLString).request.headers.first(name: "Signature"), "off out of the box")
@@ -1435,10 +1435,10 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         try ApproovService.initialize(config: validInitialConfig, comment: "reinit-signing-off")
         let afterInit = ApproovService.updateRequestWithApproov(request: ApproovRequest(
             url: try XCTUnwrap(URL(string: targetURLString)), method: "GET", headers: HTTPHeaders()))
-        XCTAssertNil(afterInit.request.headers.first(name: "Signature"), "initialize turns signing off (SPEC 3.1)")
+        XCTAssertNil(afterInit.request.headers.first(name: "Signature"), "initialize turns signing off")
     }
 
-    // SPEC 3.5: with both selected, a member that cannot be produced is left out.
+    // With both selected, a member that cannot be produced is left out.
     func testOneMemberFailsOpen() throws {
         try reinitializeService(scenarioJSON: scenarioJSON(caseName: uniqueCaseName(prefix: "no-install-key"),
                                                           body: "\"protectedDomains\": [\"\(try XCTUnwrap(URL(string: targetURLString)?.host))\"]"),
@@ -1464,7 +1464,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let response = try decide(targetURLString, mutator: signer)
         let created = try signatureCreated(response)
         let deviceNow = Int64(Date().timeIntervalSince1970)
-        XCTAssertLessThan(abs(created - (deviceNow + 3600)), 10, "created follows the server adjusted time (SPEC 3.8)")
+        XCTAssertLessThan(abs(created - (deviceNow + 3600)), 10, "created follows the server adjusted time")
         let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
         XCTAssertTrue(input.contains("expires=\(created + 15)"), "expires is created plus the lifetime")
     }
@@ -1486,7 +1486,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     func testTargetUriOmitsFragment() throws {
         let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
             url: try XCTUnwrap(URL(string: "https://example.com/p?q=1#frag")), method: "GET", headers: HTTPHeaders()))
-        // SPECIFICATION 3.3: the target URI as the stack sends it, without the fragment.
+        // The target URI as the stack sends it, without the fragment.
         XCTAssertEqual(provider.getTargetUri(), "https://example.com/p?q=1")
     }
 
@@ -1750,7 +1750,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "content-digest component must be absent once body digest is disabled")
     }
 
-    // MARK: - §6 Secure Strings & Custom JWT
+    // MARK: - Secure Strings & Custom JWT
 
     func testFetchSecureStringReturnsConfiguredValue() throws {
         setDirective(
@@ -1790,7 +1790,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertTrue(message.contains("BAD_KEY"), "Expected bad key message")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertTrue(message.contains("BAD_KEY"), "Expected bad key message")  // Status names, not SDK prose
         }
     }
 
@@ -1834,7 +1834,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchCustomJWT: DISABLED")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertEqual(message, "fetchCustomJWT: DISABLED")  // Status names, not SDK prose
         }
     }
 
@@ -1843,11 +1843,11 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             guard case let ApproovError.permanentError(message) = error else {
                 return XCTFail("Expected permanentError, got \(error)")
             }
-            XCTAssertEqual(message, "fetchCustomJWT: BAD_PAYLOAD")  // T37-36, SPEC 4.3: status names, not SDK prose
+            XCTAssertEqual(message, "fetchCustomJWT: BAD_PAYLOAD")  // Status names, not SDK prose
         }
     }
 
-    // MARK: - §7 Reinitialization
+    // MARK: - Reinitialization
 
     func testInitializeWithEmptyConfigAfterValidConfigIsIgnored() throws {
         // Initialized with valid config
@@ -1864,7 +1864,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
     func testRepeatedReinitAndOptionsCommentBehavior() throws {
         try reinitializeServiceWithTargetHost()
 
-        // SPEC 5.7(a): the SDK refuses a different comment, and the layer returns that error unchanged.
+        // The SDK refuses a different comment, and the layer returns that error unchanged.
         XCTAssertThrowsError(try ApproovService.initialize(config: validInitialConfig, comment: "options:test-option")) { error in
             guard case ApproovError.initializationFailure = error else {
                 return XCTFail("Expected initializationFailure, got \(error)")
@@ -1928,7 +1928,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let request = try HTTPClient.Request(url: targetURLString, method: .GET)
         let protectedReply = fetchNetworkReply(for: request)
         
-        // The token header is present and empty. SPEC 1.3 (3.7.0): the trace header is sent only when the SDK
+        // The token header is present and empty. The trace header is sent only when the SDK
         // supplied a trace ID, so an empty trace ID leaves it out (3.5.x sent it empty).
         let token = getHeader(from: protectedReply, key: "Approov-Token")
         let trace = getHeader(from: protectedReply, key: "Approov-TraceID")
@@ -1962,7 +1962,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         request.headers.add(name: "Api-Key", value: "placeholder-key")
         
         let reply = fetchNetworkReply(for: request)
-        // SPEC 1.4 (3.7.0): a key with no value is UNKNOWN_KEY, and the status is written into the placeholder
+        // A key with no value is UNKNOWN_KEY, and the status is written into the placeholder
         // (3.5.x kept the placeholder).
         XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "UNKNOWN_KEY")
     }
@@ -2118,7 +2118,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             try? client.syncShutdown()
         }
 
-        // SPEC 1.7(a) (3.7.0): a required digest that cannot be created is a configuration error, the layer's
+        // A required digest that cannot be created is a configuration error, the layer's
         // network error, URLError on iOS (3.5.x threw ApproovError.permanentError).
         XCTAssertThrowsError(try client.execute(request: request).wait()) { error in
             XCTAssertEqual((error as? URLError)?.code, .unknown, "got \(error)")
@@ -2143,7 +2143,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
             url: try XCTUnwrap(URL(string: url)), method: "GET", headers: headers))
     }
 
-    // T37-01, T37-01a, T37-03, T37-05, T37-06, T37-27: token decisions for a listed host.
+    // Token decisions for a listed host.
     func testTokenDecisionTablesForAListedHost() throws {
         try reinitializeServiceWithTargetHost()
         let network = ["NO_NETWORK", "POOR_NETWORK", "MITM_DETECTED"]
@@ -2182,7 +2182,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // T37-28: a failure for a host that is not listed, or with no pins map, goes out untouched.
+    // A failure for a host that is not listed, or with no pins map, goes out untouched.
     func testFailureForAHostThatIsNotListedGoesOutUntouched() throws {
         try reinitializeServiceWithTargetHost()
         for mutator in [ApproovCloseFailureMutator.CLOSE_FAILURE as ApproovServiceMutator,
@@ -2197,7 +2197,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         MiniSDKAttesterProxyController.setPinsUnavailable(true)
         defer { MiniSDKAttesterProxyController.setPinsUnavailable(false) }
         let response = try decide(targetURLString, tokenStatus: "REJECTED", mutator: ApproovCloseFailureMutator.CLOSE_FAILURE)
-        XCTAssertEqual(response.decision, .ShouldProceed, "with no pins map no host is listed (SPEC 2.4)")
+        XCTAssertEqual(response.decision, .ShouldProceed, "with no pins map no host is listed")
         XCTAssertNil(response.request.headers.first(name: "Approov-Token"))
     }
 
@@ -2208,7 +2208,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
 
     private struct InheritingMutator: ApproovServiceMutator {}
 
-    // T37-02, T37-17: an app abort is a URLError, a standard decision keeps its ApproovError.
+    // An app abort is a URLError, a standard decision keeps its ApproovError.
     func testHookErrorsOnTheRequestPath() throws {
         try reinitializeServiceWithTargetHost()
         let abort = try decide(unprotectedURLString, tokenStatus: "NO_NETWORK",
@@ -2262,7 +2262,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         ApproovService.addSubstitutionQueryParam(key: "k")
     }
 
-    // T37-07, T37-30: on a protected channel a status other than SUCCESS is written into the placeholder.
+    // On a protected channel a status other than SUCCESS is written into the placeholder.
     func testSecureStringStatusIsWrittenIntoThePlaceholder() throws {
         try secureStringScenario()
         let success = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
@@ -2279,7 +2279,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         }
     }
 
-    // T37-25: no secure string on a failure status, on http or on UNKNOWN_URL; no fetch at all.
+    // No secure string on a failure status, on http or on UNKNOWN_URL; no fetch at all.
     func testNoSecureStringWithoutAProtectedChannel() throws {
         try secureStringScenario()
         let headers = HTTPHeaders([("Api-Key", "Bearer header-key")])
@@ -2295,7 +2295,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "no secure string is fetched there")
     }
 
-    // T37-24: a secrets-only API gets its secure strings and no token or trace header.
+    // A secrets-only API gets its secure strings and no token or trace header.
     func testSecretsOnlyAPIGetsSecureStringsAndNoToken() throws {
         try secureStringScenario()
         let response = try decide(unprotectedURLString + "/p?k=query-key",
@@ -2307,7 +2307,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNil(response.request.headers.first(name: "Approov-TraceID"))
     }
 
-    // SPEC 1.4: every query occurrence on its own; a value the URL cannot carry keeps the placeholder.
+    // Every query occurrence on its own; a value the URL cannot carry keeps the placeholder.
     func testQuerySubstitutionEveryOccurrenceAndCarriability() throws {
         try secureStringScenario()
         let response = try decide(targetURLString + "/p?k=query-key&x=1&k=amp-key&k=no-such-key")
@@ -2316,7 +2316,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "a value with & cannot be carried, so its placeholder stays")
     }
 
-    // T37-29: non-delivery and failure lines are DEBUG only and carry no secret.
+    // Non-delivery and failure lines are DEBUG only and carry no secret.
     func testNonDeliveryLinesAreDebugOnly() throws {
         try secureStringScenario()
         let infoLines = try captureLogs(level: .info) {
@@ -2347,11 +2347,11 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         try reinitializeServiceWithTargetHost()
         let response = try decide(targetURLString, mutator: SwitchingMutator())
         XCTAssertEqual(response.request.headers.first(name: "X-Mutator"), "first",
-                       "a mutator change during a request does not reach that request (SPEC 6.5)")
+                       "a mutator change during a request does not reach that request")
         XCTAssertTrue(ApproovService.getServiceMutator() is ApproovAlwaysProceedMutator, "control: the change applies later")
     }
 
-    // MARK: - §5.10 Logging
+    // MARK: - Logging
 
     func testLoggingOffSilencesTheLayer() throws {
         try reinitializeServiceWithTargetHost()
@@ -2390,7 +2390,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                                                                    verifyDate: pinningFixtureDate))
         }
         XCTAssertTrue(lines.contains { $0.1.contains("Matched pin") }, "control: the match line reaches the log")
-        XCTAssertFalse(lines.contains { $0.1.contains(rootPin) }, "no line carries a pin (SPEC 2.6)")
+        XCTAssertFalse(lines.contains { $0.1.contains(rootPin) }, "no line carries a pin")
     }
 
     // MARK: - Test Helpers
