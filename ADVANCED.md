@@ -151,11 +151,12 @@ The validation runs in the TLS handshake on Network.framework, once for each con
 
 A refused connection fails with `URLError(.serverCertificateUntrusted)` at the connect timeout, because AsyncHTTPClient tries the connection again until then. To fail sooner, set a shorter `HTTPClient.Configuration.timeout.connect`.
 
-The validation runs only on a `NIOTSEventLoopGroup`, and only with `.fullVerification`. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in these cases:
+The validation runs only on a `NIOTSEventLoopGroup`, only with `.fullVerification`, and only without a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in these cases:
 
 * an `ApproovHTTPClient` made with an event loop group that is not a `NIOTSEventLoopGroup`, such as `MultiThreadedEventLoopGroup`
 * a `delegateAndChannel` event loop preference with an event loop that is not a NIOTS event loop
 * a client or request TLS configuration whose `certificateVerification` is not `.fullVerification`
+* a client configuration with a proxy (`HTTPClient.Configuration.proxy`)
 
 In bypass mode, these clients work.
 

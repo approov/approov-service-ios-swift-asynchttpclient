@@ -77,7 +77,7 @@ let request = HTTPClientRequest(url: "https://api.example.com/shapes")
 let response = try await client.execute(request, timeout: .seconds(30))
 ```
 
-Create the client with `.createNew`, or with a shared `NIOTSEventLoopGroup`, and keep TLS certificate verification at `.fullVerification`. The package can validate the connection only in that configuration. While Approov is enabled, the client refuses each request in any other configuration. See [connection validation](ADVANCED.md#connection-validation).
+Create the client with `.createNew`, or with a shared `NIOTSEventLoopGroup`, keep TLS certificate verification at `.fullVerification`, and do not set a proxy. The package can validate the connection only in that configuration. While Approov is enabled, the client refuses each request in any other configuration. See [connection validation](ADVANCED.md#connection-validation).
 
 For a transport that owns its own `HTTPClient`, `ApproovService.signRequest(_:)` returns a protected copy of a request. Create that client with `redirectConfiguration: .disallow`, or a redirect sends the protection to the next host.
 
@@ -145,7 +145,7 @@ Read the [changelog](CHANGELOG.md) for the full list of changes, and test your a
 * `prefetch()`, `proceedOnNetworkFail` and `substituteQueryParam(url:queryParameter:)` are removed. To send requests after a network failure, use `setServiceMutator(.ALWAYS_PROCEED)`. To substitute a query parameter, call `addSubstitutionQueryParam(key:)` once, and the package substitutes it in each request.
 * `getDeviceID()` no longer throws, and it returns `String?`.
 * `approovTokenHeaderAndPrefix`, `getMessageSignature(message:)` and `updateRequest(url:headers:)` are deprecated. Use `setTokenHeader(header:prefix:)`, `getAccountMessageSignature(message:)` and `ApproovHTTPClient`.
-* Create `ApproovHTTPClient` with `.createNew` or a `NIOTSEventLoopGroup`, and keep certificate verification at `.fullVerification`.
+* Create `ApproovHTTPClient` with `.createNew` or a `NIOTSEventLoopGroup`, keep certificate verification at `.fullVerification`, and do not set a proxy.
 
 ### Changes you can see
 

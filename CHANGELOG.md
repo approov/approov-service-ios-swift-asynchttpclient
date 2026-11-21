@@ -10,7 +10,7 @@ Changes since 3.5.3. Entries marked **Breaking** need a source change.
 
 ### Changed
 - **Breaking:** `getDeviceID()` returns `String?` and no longer throws.
-- **Breaking:** While Approov is enabled, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when it cannot validate the connection: an event loop group that is not a `NIOTSEventLoopGroup`, a `delegateAndChannel` event loop that is not a NIOTS loop, or a client or request TLS configuration without `.fullVerification`. See [connection validation](ADVANCED.md#connection-validation).
+- **Breaking:** While Approov is enabled, `ApproovHTTPClient` refuses a request with `URLError(.unknown)` when it cannot validate the connection: an event loop group that is not a `NIOTSEventLoopGroup`, a `delegateAndChannel` event loop that is not a NIOTS loop, a client or request TLS configuration without `.fullVerification`, or a client configuration with a proxy. See [connection validation](ADVANCED.md#connection-validation).
 - A connection that fails validation fails with `URLError(.serverCertificateUntrusted)` instead of `HTTPClientError.connectTimeout`. It still fails at the connect timeout.
 - Hosts in the pin set are matched regardless of case and a trailing dot. A domain with no keys and no Managed Trust Roots connects on OS trust, with one warning. A connection to an IP address no longer fails, unless an IP address has keys configured.
 - A failed token fetch only affects requests to your Approov API domains. A request to any other host is sent unchanged. A request that proceeds carries an empty token header, or the status name with `setUseApproovStatusIfNoToken(true)`, and the trace header when the SDK gives one.

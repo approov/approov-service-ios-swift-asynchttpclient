@@ -952,6 +952,28 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNoThrow(try posixClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait())
     }
 
+    func testClientWithAProxyIsRefused() throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString
+        // Nothing listens on port 9. The client never reaches the proxy while Approov is enabled.
+        var configuration = HTTPClient.Configuration()
+        configuration.proxy = .server(host: "127.0.0.1", port: 9)
+        configuration.timeout = HTTPClient.Configuration.Timeout(connect: .seconds(2))
+        let proxyClient = ApproovHTTPClient(eventLoopGroupProvider: .createNew, configuration: configuration)
+        defer { try? proxyClient.syncShutdown() }
+        assertPinningUnavailable(Result { try proxyClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait() },
+                                 "proxy, HTTPClient.Request API")
+        assertPinningUnavailable(blockingResult { try await proxyClient.execute(HTTPClientRequest(url: url), timeout: .seconds(10)) },
+                                 "proxy, HTTPClientRequest API")
+
+        // Bypass mode has no pins, so the layer sends the request. It then fails only because no proxy listens.
+        ApproovService.resetForTesting()
+        try ApproovService.initialize(config: "", comment: nil)
+        XCTAssertThrowsError(try proxyClient.execute(request: try HTTPClient.Request(url: url, method: .GET)).wait()) { error in
+            XCTAssertNotEqual((error as? URLError)?.code, .unknown, "the layer must not refuse the request in bypass mode: \(error)")
+        }
+    }
+
     func testEventLoopPreferenceKeepsTheEventLoop() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? group.syncShutdownGracefully() }

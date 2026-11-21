@@ -72,12 +72,15 @@ public class ApproovHTTPClient {
                    configuration: wrappedConfiguration,
                    backgroundActivityLogger: backgroundActivityLogger)
         // AsyncHTTPClient runs the Approov pin check only on the Network.framework path, which needs a
-        // NIOTSEventLoopGroup, and only when TLS verification is full.
+        // NIOTSEventLoopGroup, only when TLS verification is full, and only without a proxy. Through a proxy,
+        // AsyncHTTPClient sets up TLS with NIOSSL.
         var reason: String? = nil
         if case .shared(let group) = eventLoopGroupProvider, !ApproovHTTPClient.usesNetworkFramework(group) {
             reason = "ApproovHTTPClient needs a NIOTSEventLoopGroup: Approov pinning does not run on \(type(of: group))"
         } else if let tls = configuration.tlsConfiguration, tls.certificateVerification != .fullVerification {
             reason = "ApproovHTTPClient TLS configuration: certificateVerification must be .fullVerification, because Approov pinning does not run otherwise"
+        } else if configuration.proxy != nil {
+            reason = "ApproovHTTPClient configuration: a proxy is set, and Approov pinning does not run through a proxy"
         }
         pinningUnavailableReason = reason
     }
