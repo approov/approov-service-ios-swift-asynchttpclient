@@ -2989,4 +2989,20 @@ extension ApproovServiceMiniSDKTests {
         }
         XCTAssertEqual(levels(lines, containing: "install message signature unavailable, signed without it"), [.warning, .debug, .warning])
     }
+
+    func testTargetUriLeavesOutADefaultPort() throws {
+        let targetUris = [
+            ("https://api.example.com:443/", "https://api.example.com/"),
+            ("https://api.example.com:443/v1?a=1", "https://api.example.com/v1?a=1"),
+            ("http://api.example.com:80/v1", "http://api.example.com/v1"),
+            ("https://api.example.com:8443/v1", "https://api.example.com:8443/v1"),
+            ("http://api.example.com:443/v1", "http://api.example.com:443/v1"),
+            ("https://api.example.com/v1%2Fx?q=a%20b#frag", "https://api.example.com/v1%2Fx?q=a%20b"),
+        ]
+        for (sent, signed) in targetUris {
+            let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
+                url: try XCTUnwrap(URL(string: sent)), method: "GET", headers: HTTPHeaders()))
+            XCTAssertEqual(provider.getTargetUri(), signed, sent)
+        }
+    }
 }

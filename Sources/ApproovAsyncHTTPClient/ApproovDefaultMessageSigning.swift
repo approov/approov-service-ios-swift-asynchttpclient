@@ -717,13 +717,20 @@ class ApproovAsyncHTTPClientComponentProvider: ComponentProvider {
         return request.url.scheme ?? "http"
     }
 
+    // @target-uri: the URL as it is sent, without the fragment and without the scheme's default port
     public func getTargetUri() -> String {
-        // The URL as the stack sends it. A fragment is never sent, so remove it.
-        let uri = request.url.absoluteString
-        if let fragmentStart = uri.firstIndex(of: "#") {
-            return String(uri[..<fragmentStart])
+        let url = request.url
+        let scheme = url.scheme?.lowercased()
+        if let port = url.port, (scheme == "https" && port == 443) || (scheme == "http" && port == 80),
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.port = nil
+            components.fragment = nil
+            if let target = components.string {
+                return target
+            }
         }
-        return uri
+        let target = url.absoluteString
+        return target.firstIndex(of: "#").map { String(target[..<$0]) } ?? target
     }
 
     public func getRequestTarget() -> String {
