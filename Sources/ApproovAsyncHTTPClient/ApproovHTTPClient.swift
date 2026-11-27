@@ -21,6 +21,7 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
 import NIOHTTPCompression
 import NIOPosix
@@ -33,6 +34,13 @@ import NIOTransportServices
 public class ApproovHTTPClient {
 
     let httpClientDelegate: HTTPClient
+
+    /// Why Approov pinning cannot run on this client, or nil when it can.
+    let pinningUnavailableReason: String?
+
+    /// The app's redirect settings, or nil when the app disallows redirects. The wrapped client never follows a
+    /// redirect: this client follows it and protects each hop as a new request.
+    let redirectPolicy: ApproovRedirectPolicy?
 
     internal static let loggingDisabled = Logger(label: "ApproovHTTPClient-do-not-log",
         factory: { _ in SwiftLogNoOpLogHandler() })
@@ -57,9 +65,40 @@ public class ApproovHTTPClient {
     public required init(eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider,
                          configuration: HTTPClient.Configuration = HTTPClient.Configuration(),
                          backgroundActivityLogger: Logger) {
+        var wrappedConfiguration = configuration
+        wrappedConfiguration.redirectConfiguration = .disallow
+        redirectPolicy = ApproovRedirectPolicy.of(configuration.redirectConfiguration)
         httpClientDelegate = HTTPClient(eventLoopGroupProvider: eventLoopGroupProvider,
-                   configuration: configuration,
+                   configuration: wrappedConfiguration,
                    backgroundActivityLogger: backgroundActivityLogger)
+        // AsyncHTTPClient runs the Approov pin check only on the Network.framework path, which needs a
+        // NIOTSEventLoopGroup, only when TLS verification is full, and only without a proxy. Through a proxy,
+        // AsyncHTTPClient sets up TLS with NIOSSL.
+        var reason: String? = nil
+        if case .shared(let group) = eventLoopGroupProvider, !ApproovHTTPClient.usesNetworkFramework(group) {
+            reason = "ApproovHTTPClient needs a NIOTSEventLoopGroup: Approov pinning does not run on \(type(of: group))"
+        } else if let tls = configuration.tlsConfiguration, tls.certificateVerification != .fullVerification {
+            reason = "ApproovHTTPClient TLS configuration: certificateVerification must be .fullVerification, because Approov pinning does not run otherwise"
+        } else if configuration.proxy != nil {
+            reason = "ApproovHTTPClient configuration: a proxy is set, and Approov pinning does not run through a proxy"
+        }
+        pinningUnavailableReason = reason
+    }
+
+    /// Whether AsyncHTTPClient connects on the Network.framework path for a group or an event loop. It is the
+    /// same check that AsyncHTTPClient makes when it selects the connection bootstrap.
+    static func usesNetworkFramework(_ group: EventLoopGroup) -> Bool {
+        if #available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *) {
+            return NIOTSConnectionBootstrap(validatingGroup: group) != nil
+        }
+        return false
+    }
+
+    /// Fails a request when Approov protection is on and pinning cannot run on this client.
+    static func checkPinningAvailable(_ reason: String?) throws {
+        if let reason, ApproovService.isApproovEnabled() {
+            throw ApproovRequestPathError.configuration(reason)
+        }
     }
 
     /// Shuts down the client and `EventLoopGroup` if it was created by the client.
@@ -418,49 +457,64 @@ public class ApproovHTTPClient {
         deadline: NIODeadline? = nil,
         logger originalLogger: Logger?
     ) -> ApproovHTTPClient.Task<Delegate, Delegate.Response> {
+        let preference = EventLoopPreference(eventLoopPreference)
+        var reason = pinningUnavailableReason
+        if reason == nil, case .delegateAndChannel(on: let eventLoop) = preference.preference,
+           !ApproovHTTPClient.usesNetworkFramework(eventLoop) {
+            // A channel event loop that is not a NIOTSEventLoop forces the NIOSSL path, where pinning does not run.
+            reason = "ApproovHTTPClient: delegateAndChannel needs a NIOTSEventLoop for Approov pinning"
+        }
         let task = ApproovHTTPClient.Task<Delegate, Delegate.Response>(
             httpClientDelegate: httpClientDelegate,
             request: request,
             delegate: delegate,
-            eventLoopPreference: .indifferent,
+            eventLoopPreference: preference,
             deadline: deadline,
-            logger: originalLogger ?? ApproovHTTPClient.loggingDisabled)
+            logger: originalLogger ?? ApproovHTTPClient.loggingDisabled,
+            pinningUnavailableReason: reason,
+            redirectPolicy: redirectPolicy)
         task.runInBackground()
         return task
     }
 
     /// Update a request for Approov
-    private static func approovUpdateRequest(request: HTTPClient.Request) throws -> HTTPClient.Request {
-        let (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: request.url, headers: request.headers)
-        // Return the modified request
-        return try HTTPClient.Request(
-            url: updatedURL,
-            method: request.method,
-            headers: updatedHeaders,
-            body: request.body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
-        )
-    }
-
-    /// Update a request for Approov
-    private static func approovUpdateRequest(
-        url: String,
-        method: HTTPMethod,
-        body: HTTPClient.Body?
-    ) throws -> HTTPClient.Request {
-        var updatedURLString = url
-        var updatedHeaders: HTTPHeaders = HTTPHeaders()
-        if var updatedURL: URL = URL(string: url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+    static func approovUpdateRequest(request: HTTPClient.Request, mutator: ApproovServiceMutator, substituteQuery: Bool) throws -> HTTPClient.Request {
+        // In the Approov AsyncHTTPClient fork, a TLS configuration without full verification completes the
+        // handshake without the Approov pin check. Reject it, so that one request option cannot disable pinning.
+        if let tlsConfiguration = request.tlsConfiguration,
+           tlsConfiguration.certificateVerification != .fullVerification,
+           ApproovService.isApproovEnabled() {
+            throw ApproovRequestPathError.configuration(
+                "Request TLS configuration for \(request.url.host ?? ""): certificateVerification must be "
+                + ".fullVerification, because Approov pinning does not run otherwise")
         }
-        return try HTTPClient.Request(
-            url: updatedURLString,
-            method: method,
-            headers: updatedHeaders,
-            body: body,
-            tlsConfiguration: nil /* request specific TLS configuration is always unused */
+        // The body closure runs before the send only if the mutator gets the body, for a body digest.
+        let approovReq = ApproovRequest(
+            url: request.url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            bodyProvider: { ApproovService.extractBodyData(from: request.body) }
         )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            return try HTTPClient.Request(
+                url: response.request.url,
+                method: request.method,
+                headers: response.request.headers,
+                body: request.body,
+                tlsConfiguration: request.tlsConfiguration
+            )
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(request.url.host ?? ""): \(response.sdkMessage)")
+        }
     }
 }
 
@@ -478,8 +532,37 @@ extension ApproovHTTPClient {
         deadline: NIODeadline,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
-        let updatedRequest = try await ApproovHTTPClient.approovUpdateRequest(request: request)
-        return try await httpClientDelegate.execute(updatedRequest, deadline: deadline, logger: logger)
+        try ApproovHTTPClient.checkPinningAvailable(pinningUnavailableReason)
+        // One request, one mutator, and each hop is the app's request for its URL.
+        let mutator = ApproovService.getServiceMutator()
+        var tracker = redirectPolicy.map { ApproovRedirectTracker(policy: $0, initialURL: request.url) }
+        var hop = ApproovClientRequestHop(request: request, substituteQuery: true)
+        while true {
+            let start = ProcessInfo.processInfo.systemUptime
+            let current = hop
+            let wireRequest = try await ApproovHTTPClient.runOffCooperativePool {
+                try ApproovHTTPClient.approovUpdateRequest(request: current.request, mutator: mutator,
+                                                           substituteQuery: current.substituteQuery)
+            }
+            let response: HTTPClientResponse
+            do {
+                response = try await httpClientDelegate.execute(wireRequest, deadline: deadline, logger: logger)
+            } catch {
+                throw ApproovPinningVerifier.mapPinningFailure(error, host: URL(string: wireRequest.url)?.host, since: start)
+            }
+            guard var followed = tracker, let wireURL = URL(string: wireRequest.url),
+                  let target = ApproovRedirects.target(status: response.status, headers: response.headers, from: wireURL) else {
+                return response
+            }
+            try followed.redirect(to: target.absoluteString)
+            tracker = followed
+            let next = hop.following(status: response.status, to: target, wireURL: wireURL)
+            // As in AsyncHTTPClient, a body that can be sent only once ends the chain with the redirect response.
+            guard ApproovRedirects.canBeSentAgain(next.request.body) else {
+                return response
+            }
+            hop = next
+        }
     }
 
     /// Execute arbitrary HTTP requests.
@@ -494,24 +577,99 @@ extension ApproovHTTPClient {
         timeout: TimeAmount,
         logger: Logger? = nil
     ) async throws -> HTTPClientResponse {
-        let updatedRequest = try await ApproovHTTPClient.approovUpdateRequest(request: request)
-        return try await httpClientDelegate.execute(updatedRequest, timeout: timeout, logger: logger)
+        return try await execute(request, deadline: .now() + timeout, logger: logger)
+    }
+
+    /// Runs blocking Approov work on a Dispatch queue. The token fetch blocks its thread, and the Swift
+    /// concurrency pool has about one thread for each CPU core, so this work must not run on that pool.
+    private static func runOffCooperativePool<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
     }
 
     /// Update a request for Approov
-    private static func approovUpdateRequest(request: HTTPClientRequest) async throws -> HTTPClientRequest {
-        var updatedURLString = request.url
-        var updatedHeaders: HTTPHeaders = request.headers
-        if var updatedURL: URL = URL(string: request.url) {
-            (updatedURL, updatedHeaders) = try ApproovService.updateRequest(url: updatedURL, headers: updatedHeaders)
-            updatedURLString = updatedURL.absoluteString
+    static func approovUpdateRequest(request: HTTPClientRequest, mutator: ApproovServiceMutator, substituteQuery: Bool) throws -> HTTPClientRequest {
+        guard let url = URL(string: request.url) else {
+            throw HTTPClientError.invalidURL
         }
-        // Return the modified request
-        var newRequest = HTTPClientRequest(url: updatedURLString)
-        newRequest.method = request.method
-        newRequest.headers = updatedHeaders
-        newRequest.body = request.body
-        return newRequest
+        
+        let approovReq = ApproovRequest(
+            url: url,
+            method: request.method.rawValue,
+            headers: request.headers,
+            bodyProvider: { ApproovHTTPClient.extractBodyData(from: request.body) }
+        )
+        
+        let response = ApproovService.updateRequestWithApproov(request: approovReq, mutator: mutator, substituteQuery: substituteQuery)
+        if let error = response.error {
+            throw error
+        }
+        
+        switch response.decision {
+        case .ShouldProceed, .ShouldIgnore:
+            var newRequest = HTTPClientRequest(url: response.request.url.absoluteString)
+            newRequest.method = request.method
+            newRequest.headers = response.request.headers
+            newRequest.body = request.body
+            return newRequest
+        case .ShouldRetry:
+            throw ApproovError.networkingError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        case .ShouldFail:
+            throw ApproovError.permanentError(message: "Token fetch for \(url.host ?? ""): \(response.sdkMessage)")
+        }
+    }
+
+    /// Gets the body bytes of an in-memory or repeatable body, for a body digest. The layer calls this function
+    /// only when it computes a body digest. It does not read a one-shot or streaming body.
+    private static func extractBodyData(from body: HTTPClientRequest.Body?) -> Data? {
+        guard let body = body else { return nil }
+        let mirror = Mirror(reflecting: body)
+        for child in mirror.children {
+            if child.label == "mode" {
+                let modeMirror = Mirror(reflecting: child.value)
+                guard modeMirror.displayStyle == .enum, let caseLabel = modeMirror.children.first?.label else {
+                    continue
+                }
+                if caseLabel == "byteBuffer", let byteBuffer = modeMirror.children.first?.value as? ByteBuffer {
+                    return byteBuffer.getData(at: byteBuffer.readerIndex, length: byteBuffer.readableBytes)
+                } else if caseLabel == "sequence" {
+                    let associatedValue = modeMirror.children.first!.value
+                    let assocMirror = Mirror(reflecting: associatedValue)
+                    var canBeConsumedMultipleTimes = false
+                    var closure: ((ByteBufferAllocator) -> ByteBuffer)? = nil
+                    
+                    let childrenArray = Array(assocMirror.children)
+                    if childrenArray.count >= 3 {
+                        if let flag = childrenArray[1].value as? Bool {
+                            canBeConsumedMultipleTimes = flag
+                        }
+                        if let val = childrenArray[2].value as? (ByteBufferAllocator) -> ByteBuffer {
+                            closure = val
+                        }
+                    } else {
+                        for assocChild in assocMirror.children {
+                            if assocChild.label == "canBeConsumedMultipleTimes", let value = assocChild.value as? Bool {
+                                canBeConsumedMultipleTimes = value
+                            } else if let val = assocChild.value as? (ByteBufferAllocator) -> ByteBuffer {
+                                closure = val
+                            }
+                        }
+                    }
+                    
+                    if canBeConsumedMultipleTimes, let closure = closure {
+                        let allocator = ByteBufferAllocator()
+                        let byteBuffer = closure(allocator)
+                        return byteBuffer.getData(at: byteBuffer.readerIndex, length: byteBuffer.readableBytes)
+                    }
+                }
+            }
+        }
+        // The body is one-shot or streaming, and this function does not read it. Or the AsyncHTTPClient
+        // body layout changed and reflection does not match it. In both cases the layer makes no body digest.
+        return nil
     }
 }
 
@@ -543,6 +701,12 @@ extension ApproovHTTPClient {
         // Promise that completes when the wrapped HTTPClient.Task's promise completes
         let promise: EventLoopPromise<Delegate.Response>
 
+        // Why Approov pinning cannot run for this request, or nil when it can
+        let pinningUnavailableReason: String?
+
+        // The app's redirect settings, or nil when the app disallows redirects
+        let redirectPolicy: ApproovRedirectPolicy?
+
         // Wrapped HTTPClient.Task
         private var _httpClientTask: HTTPClient.Task<Delegate.Response>?
 
@@ -552,7 +716,11 @@ extension ApproovHTTPClient {
              delegate: Delegate,
              eventLoopPreference: ApproovHTTPClient.EventLoopPreference,
              deadline: NIODeadline? = nil,
-             logger: Logger) {
+             logger: Logger,
+             pinningUnavailableReason: String? = nil,
+             redirectPolicy: ApproovRedirectPolicy? = nil) {
+            self.pinningUnavailableReason = pinningUnavailableReason
+            self.redirectPolicy = redirectPolicy
             self.httpClient = httpClientDelegate
             self.request = request
             self.delegate = delegate
@@ -582,41 +750,85 @@ extension ApproovHTTPClient {
             }
         }
 
-        // Runs updating the request for Approov on a background thread and, when this completes, executes the request
-        // using an HTTPClient
+        // Runs the request as a chain of hops. Each hop is the app's request for its URL, protected on a background
+        // thread as a new request, under the mutator that the request started with.
         public func runInBackground() {
             DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    // Update the request for Approov
-                    let updatedRequest = try ApproovHTTPClient.approovUpdateRequest(request: self.request)
-                    if self.isCancelled {
-                        self.promise.fail(HTTPClientError.cancelled)
-                        return
-                    }
-                    // Execute the modified request using the original HTTPClient
-                    let httpClientTask = self.httpClient.execute(
-                        request: updatedRequest,
-                        delegate: self.delegate,
-                        eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
-                        deadline: self.deadline,
-                        logger: self.logger)
-                    self.lock.withLock {
-                        self._httpClientTask = httpClientTask
-                    }
-                    // Set up the promise to complete when the wrapped HTTPClient.Task's promise completes
-                    self._httpClientTask!.futureResult.whenComplete { result in
-                        switch result {
-                        case .failure(let error):
-                            self.promise.fail(error)
-                        case .success(let response):
-                            self.promise.succeed(response)
-                        }
-                    }
-                } catch {
-                    self.promise.fail(error)
+                let mutator = ApproovService.getServiceMutator()
+                let tracker = self.redirectPolicy.map {
+                    ApproovRedirectTracker(policy: $0, initialURL: self.request.url.absoluteString)
                 }
+                self.runHop(ApproovRequestHop(request: self.request, substituteQuery: true), tracker: tracker, mutator: mutator)
             }
-       }
+        }
+
+        // Protects and sends one hop. It runs off the event loop, because the token fetch blocks.
+        private func runHop(_ hop: ApproovRequestHop, tracker: ApproovRedirectTracker?, mutator: ApproovServiceMutator) {
+            let start = ProcessInfo.processInfo.systemUptime
+            do {
+                try ApproovHTTPClient.checkPinningAvailable(self.pinningUnavailableReason)
+                let wireRequest = try ApproovHTTPClient.approovUpdateRequest(
+                    request: hop.request, mutator: mutator, substituteQuery: hop.substituteQuery)
+                if self.isCancelled {
+                    self.promise.fail(HTTPClientError.cancelled)
+                    return
+                }
+                let forwarder = ApproovRedirectForwarder(delegate: self.delegate, wireURL: wireRequest.url,
+                                                         follows: tracker != nil)
+                let httpClientTask = self.httpClient.execute(
+                    request: wireRequest,
+                    delegate: forwarder,
+                    eventLoop: self.eventLoopPreference.httpClientEventLoopPreference,
+                    deadline: self.deadline,
+                    logger: self.logger)
+                // Store the task and re-check cancellation under the same lock to close the race
+                // where cancel() arrives between the check above and the task being stored: such a
+                // cancel() would otherwise read a nil task and the request would run uncancelled.
+                let cancelledBeforeStore = self.lock.withLock { () -> Bool in
+                    if self._isCancelled {
+                        return true
+                    }
+                    self._httpClientTask = httpClientTask
+                    return false
+                }
+                if cancelledBeforeStore {
+                    httpClientTask.cancel()
+                    self.promise.fail(HTTPClientError.cancelled)
+                    return
+                }
+                httpClientTask.futureResult.whenComplete { result in
+                    switch result {
+                    case .success(let response):
+                        self.promise.succeed(response)
+                    case .failure(let redirect as ApproovRedirectSignal):
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            self.follow(redirect, from: hop, wireURL: wireRequest.url, tracker: tracker, mutator: mutator)
+                        }
+                    case .failure(let error):
+                        self.promise.fail(ApproovPinningVerifier.mapPinningFailure(error, host: wireRequest.url.host, since: start))
+                    }
+                }
+            } catch {
+                self.promise.fail(error)
+            }
+        }
+
+        // Starts the next hop of a redirect, inside the app's redirect limits.
+        private func follow(_ redirect: ApproovRedirectSignal, from hop: ApproovRequestHop, wireURL: URL,
+                            tracker: ApproovRedirectTracker?, mutator: ApproovServiceMutator) {
+            // The forwarder reports a redirect only when the app follows redirects, so the tracker is set.
+            guard var tracker else {
+                self.promise.fail(HTTPClientError.redirectLimitReached)
+                return
+            }
+            do {
+                try tracker.redirect(to: redirect.target.absoluteString)
+                let next = try hop.following(status: redirect.status, to: redirect.target, wireURL: wireURL)
+                self.runHop(next, tracker: tracker, mutator: mutator)
+            } catch {
+                self.promise.fail(error)
+            }
+        }
 
         /// `EventLoopFuture` for the response returned by the request.
         public var futureResult: EventLoopFuture<Delegate.Response> {
@@ -692,8 +904,44 @@ extension ApproovHTTPClient {
             self.preference = preference
         }
 
+        /// Initializer mapping from HTTPClient.EventLoopPreference using reflection
+        public init(_ httpClientPreference: HTTPClient.EventLoopPreference) {
+            let mirror = Mirror(reflecting: httpClientPreference)
+            for child in mirror.children {
+                if child.label == "preference" {
+                    let prefMirror = Mirror(reflecting: child.value)
+                    if prefMirror.displayStyle == .enum, let payload = prefMirror.children.first,
+                       let caseLabel = payload.label {
+                        if caseLabel == "indifferent" {
+                            self.preference = .indifferent
+                            return
+                        } else if caseLabel == "delegate", let eventLoop = Self.eventLoop(in: payload.value) {
+                            self.preference = .delegate(on: eventLoop)
+                            return
+                        } else if caseLabel == "delegateAndChannel", let eventLoop = Self.eventLoop(in: payload.value) {
+                            self.preference = .delegateAndChannel(on: eventLoop)
+                            return
+                        }
+                    }
+                }
+            }
+            // The reflection above relies on AsyncHTTPClient internals; if its shape ever changes we
+            // cannot map the preference and fall back to .indifferent. This is a known limitation of
+            // bridging the wrapped client's EventLoopPreference.
+            self.preference = .indifferent
+        }
+
+        /// Gets the event loop from an enum payload. A case with a labeled value, such as
+        /// `delegateAndChannel(on:)`, reflects its payload as the one-element tuple `(on: EventLoop)`.
+        private static func eventLoop(in payload: Any) -> EventLoop? {
+            if let eventLoop = payload as? EventLoop {
+                return eventLoop
+            }
+            return Mirror(reflecting: payload).children.first?.value as? EventLoop
+        }
+
         /// Event Loop will be selected by the library.
-        public static let indifferent = EventLoopPreference(.indifferent)
+        public static let indifferent = EventLoopPreference(Preference.indifferent)
 
         /// The delegate will be run on the specified EventLoop (and the Channel if possible).
         ///
@@ -701,7 +949,7 @@ extension ApproovHTTPClient {
         /// `EventLoop` but will not establish a new network connection just to satisfy the `EventLoop` preference if
         /// another existing connection on a different `EventLoop` is readily available from a connection pool.
         public static func delegate(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegate(on: eventLoop))
+            return EventLoopPreference(Preference.delegate(on: eventLoop))
         }
 
         /// The delegate and the `Channel` will be run on the specified EventLoop.
@@ -709,7 +957,7 @@ extension ApproovHTTPClient {
         /// Use this for use-cases where you prefer a new connection to be established over re-using an existing
         /// connection that might be on a different `EventLoop`.
         public static func delegateAndChannel(on eventLoop: EventLoop) -> EventLoopPreference {
-            return EventLoopPreference(.delegateAndChannel(on: eventLoop))
+            return EventLoopPreference(Preference.delegateAndChannel(on: eventLoop))
         }
 
         /// The value of the wrapped HTTPClient.EventLoopPreference
