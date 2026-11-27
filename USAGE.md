@@ -149,6 +149,20 @@ let signer = ApproovDefaultMessageSigning().setDefaultFactory(factory)
 ApproovService.setServiceMutator(signer)
 ```
 
+The signer makes the standard decisions, the same as `CLOSE_FAILURE`. To sign under other decisions, use [`combined(decisions:)`](#sign-with-other-decisions).
+
+When a signature cannot be produced, the request goes ahead with the other signature or unsigned. The package logs a missing install or account signature as a warning once per process, such as `ApproovService: install message signature unavailable, signed without it`. It logs a request sent unsigned as an error once per process, such as `ApproovService: no message signature could be produced, proceeding unsigned: ...`. It logs later occurrences at `.debug`.
+
+## Sign with Other Decisions
+
+`ApproovDefaultMessageSigning.combined(decisions:)` returns a signer that adds both the install and the account signature. It makes the decisions of `decisions`: `.CLOSE_FAILURE`, `.ALWAYS_PROCEED`, `.DEFAULT` or a mutator of your own. `combined()` uses `.DEFAULT`, the same as `.CLOSE_FAILURE`. Your backend can use the install signature only if the Approov token carries the install public key. Turn that on for your account with `approov policy -setInstallPubKey on` (see [installation message signing](https://docs.approov.io/operations/message-signing/installation/)). Each call returns a new `ApproovDefaultMessageSigning`, so `setDefaultFactory(_:)` and `putHostFactory(hostName:factory:)` on it change only that signer.
+
+```swift
+ApproovService.setServiceMutator(ApproovDefaultMessageSigning.combined(decisions: .CLOSE_FAILURE))
+
+ApproovService.setServiceMutator(ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED))
+```
+
 ## Custom Message Signing Parameters
 
 ```swift
@@ -163,6 +177,10 @@ let signer = ApproovDefaultMessageSigning()
 
 ApproovService.setServiceMutator(signer)
 ```
+
+## Target URI
+
+The signature covers the target URI of the request as AsyncHTTPClient sends it, without the fragment and without the default port of the scheme. So `https://api.example.com:443/v1` and `https://api.example.com/v1` give the same signature.
 
 ## Body Digest
 
@@ -206,6 +224,8 @@ ApproovService.bindHeader = "Authorization"
 ```
 
 If the value of the binding header changes (e.g., a new OAuth token is received), the SDK automatically invalidates the current Approov token and fetches a new one with the updated binding on the next request.
+
+The package finds the binding header without regard to case. Requests in flight at the same time with different binding values each have a token bound to their own value.
 
 ---
 
