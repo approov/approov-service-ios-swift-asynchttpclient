@@ -9,7 +9,7 @@ import PackageDescription
 // workflow (release.yml) then tags main at this version.
 let releaseTAG = "3.5.4"
 // SDK package version
-let sdkVersion: Version = "3.5.3"
+let sdkVersion: Version = "3.7.0"
 // NOTE: The useMiniSDK flag and miniSDKPath are used for local and CI automated testing only.
 // They are not included or used in production releases, which depend exclusively on the real approov-ios-sdk.
 let useMiniSDK = ProcessInfo.processInfo.environment["APPROOV_USE_MINI_SDK"] == "1"

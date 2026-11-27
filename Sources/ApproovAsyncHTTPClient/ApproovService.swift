@@ -1224,18 +1224,13 @@ public class ApproovService {
     }
 
     /**
-     * The server adjusted time from the SDK, found at run time because SDK 3.5.3 does not have the method. If it
-     * is unavailable, the device clock is used and one warning is logged.
+     * The server adjusted time from the SDK. If the SDK gives no time, because it is not initialized, the device
+     * clock is used and one warning is logged.
      */
     static func serverAdjustedTimeMS() -> Int64 {
-        let selector = NSSelectorFromString("getServerAdjustedCurrentTimeMS")
-        let sdk: AnyObject = Approov.self
-        if sdk.responds(to: selector), let implementation = sdk.method(for: selector) {
-            typealias ServerAdjustedTime = @convention(c) (AnyObject, Selector) -> Int64
-            let time = unsafeBitCast(implementation, to: ServerAdjustedTime.self)(sdk, selector)
-            if time > 0 {
-                return time
-            }
+        let time = Approov.getServerAdjustedCurrentTimeMS()
+        if time > 0 {
+            return time
         }
         let firstUse = stateLock.withLock { () -> Bool in
             defer { deviceClockWarned = true }
