@@ -58,15 +58,111 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
      */
     private var hostFactories: [String: SignatureParametersFactory]
 
+    // providers that replace the SDK signatures in tests
+    private var installMessageSignatureProviderForTesting: ((String) -> String?)?
+    private var accountMessageSignatureProviderForTesting: ((String) -> String?)?
+
+    // the mutator that makes the decisions, or nil for the CLOSE_FAILURE decisions of init()
+    private let decisions: ApproovServiceMutator?
+
     /**
      * Initializer
      */
     public init() {
         hostFactories = [:]
+        decisions = nil
+    }
+
+    /**
+     * Creates a signer that makes the decisions of another mutator and signs the requests that mutator
+     * processed. Every decision hook is passed to the given mutator, and the request its
+     * handleInterceptorProcessedRequest returns is then signed, so a change it makes is covered by the
+     * signature. Apps use combined(decisions:).
+     *
+     * @param decisions is the mutator that makes the decisions, a standard one or your own
+     */
+    internal init(decisions: ApproovServiceMutator) {
+        hostFactories = [:]
+        self.decisions = decisions
+    }
+
+    /**
+     * Gets a new message signing service mutator that adds both the install and the account signature to
+     * every request carrying the Approov token header, and makes the decisions of the given mutator, such as
+     * .CLOSE_FAILURE, .ALWAYS_PROCEED or your own. A signature that cannot be produced is left out and the
+     * request goes ahead with the other one, or unsigned. Install it with ApproovService.setServiceMutator.
+     *
+     * @param decisions is the mutator whose decisions are to be made
+     * @return a new signer with the default factory set to sign with both signatures
+     */
+    public static func combined(decisions: ApproovServiceMutator) -> ApproovDefaultMessageSigning {
+        return ApproovDefaultMessageSigning(decisions: decisions)
+            .setDefaultFactory(generateDefaultSignatureParametersFactory().setUseInstallAndAccountMessageSigning())
+    }
+
+    /**
+     * Gets a new message signing service mutator that adds both the install and the account signature to
+     * every request carrying the Approov token header, and makes the .DEFAULT decisions.
+     *
+     * @return a new signer with the default factory set to sign with both signatures
+     */
+    public static func combined() -> ApproovDefaultMessageSigning {
+        return combined(decisions: .DEFAULT)
+    }
+
+    // the mutator that makes the decisions, CLOSE_FAILURE if none was given
+    private var decider: ApproovServiceMutator {
+        return decisions ?? ApproovCloseFailureMutator.instance
     }
 
     public var description: String {
-        return "ApproovDefaultMessageSigning"
+        guard let decisions else {
+            return "ApproovDefaultMessageSigning"
+        }
+        return "ApproovDefaultMessageSigning(\(String(describing: decisions)))"
+    }
+
+    // the decision hooks, each made by the decisions mutator. A standard decision it throws is recorded for the
+    // hook call in progress, so it reaches the app in the same form as when that mutator is installed on its own.
+
+    public func handlePrecheckResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try decider.handlePrecheckResult(approovResults)
+    }
+
+    public func handleFetchTokenResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try decider.handleFetchTokenResult(approovResults)
+    }
+
+    public func handleFetchSecureStringResult(_ approovResults: ApproovTokenFetchResult,
+                                              operation: String,
+                                              key: String) throws {
+        try decider.handleFetchSecureStringResult(approovResults, operation: operation, key: key)
+    }
+
+    public func handleFetchCustomJWTResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try decider.handleFetchCustomJWTResult(approovResults)
+    }
+
+    public func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool {
+        return try decider.handleInterceptorShouldProcessRequest(request)
+    }
+
+    public func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        return try decider.handleInterceptorFetchTokenResult(approovResults, url: url)
+    }
+
+    public func handleInterceptorHeaderSubstitutionResult(_ approovResults: ApproovTokenFetchResult,
+                                                          header: String) throws -> Bool {
+        return try decider.handleInterceptorHeaderSubstitutionResult(approovResults, header: header)
+    }
+
+    public func handleInterceptorQueryParamSubstitutionResult(_ approovResults: ApproovTokenFetchResult,
+                                                              queryKey: String) throws -> Bool {
+        return try decider.handleInterceptorQueryParamSubstitutionResult(approovResults, queryKey: queryKey)
+    }
+
+    public func handlePinningShouldProcessRequest(hostname: String) -> Bool {
+        return decider.handlePinningShouldProcessRequest(hostname: hostname)
     }
 
     /**
@@ -93,6 +189,24 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         return self
     }
 
+    func setInstallMessageSignatureProviderForTesting(_ provider: ((String) -> String?)?) -> ApproovDefaultMessageSigning {
+        installMessageSignatureProviderForTesting = provider
+        return self
+    }
+
+    func setAccountMessageSignatureProviderForTesting(_ provider: ((String) -> String?)?) -> ApproovDefaultMessageSigning {
+        accountMessageSignatureProviderForTesting = provider
+        return self
+    }
+
+    private func installMessageSignature(message: String) -> String? {
+        return installMessageSignatureProviderForTesting?(message) ?? ApproovService.getInstallMessageSignature(message: message)
+    }
+
+    private func accountMessageSignature(message: String) -> String? {
+        return accountMessageSignatureProviderForTesting?(message) ?? ApproovService.getAccountMessageSignature(message: message)
+    }
+
     /** The factory for the request's host, compared as pins are looked up, or the default factory. */
     private func factory(for provider: ApproovAsyncHTTPClientComponentProvider) -> SignatureParametersFactory? {
         let host = ApproovService.normalisedHost(provider.getRequest().url.host ?? "")
@@ -103,14 +217,13 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
         return try factory(for: provider)?.buildSignatureParameters(provider: provider, changes: changes)
     }
 
-    /** The CLOSE_FAILURE token decision, open for a subclass to change. */
-    public func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
-        return try ApproovCloseFailureMutator.CLOSE_FAILURE.handleInterceptorFetchTokenResult(approovResults, url: url)
-    }
-
+    /**
+     * Processes a request to add message signature headers. The decisions mutator processes the request first,
+     * and the request it returns is signed.
+     */
     public func handleInterceptorProcessedRequest(_ request: ApproovRequest,
                                                    changes: ApproovRequestMutations) throws -> ApproovRequest {
-        return try signedRequest(request, changes: changes)
+        return try signedRequest(decider.handleInterceptorProcessedRequest(request, changes: changes), changes: changes)
     }
 
     @available(*, deprecated, message: "Use handleInterceptorProcessedRequest instead.")
@@ -156,14 +269,14 @@ public class ApproovDefaultMessageSigning: ApproovServiceMutator, CustomStringCo
                 let message = try SignatureBaseBuilder(sigParams: memberParams, ctx: provider).createSignatureBase()
                 let signature: Data
                 if alg == ApproovDefaultMessageSigning.ALG_ES256 {
-                    guard let base64Signature = ApproovService.getInstallMessageSignature(message: message),
+                    guard let base64Signature = installMessageSignature(message: message),
                           let decodedSignature = Data(base64Encoded: base64Signature) else {
                         ApproovService.log(.error, "ApproovService: install message signature unavailable, leaving it out")
                         continue
                     }
                     signature = try ApproovDefaultMessageSigning.decodeASN_1_DER_ES256_Signature(decodedSignature)
                 } else {
-                    guard let base64Signature = ApproovService.getAccountMessageSignature(message: message),
+                    guard let base64Signature = accountMessageSignature(message: message),
                           let decodedSignature = Data(base64Encoded: base64Signature) else {
                         ApproovService.log(.error, "ApproovService: account message signature unavailable, leaving it out")
                         continue

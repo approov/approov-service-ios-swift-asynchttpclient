@@ -2701,3 +2701,227 @@ extension ApproovServiceMiniSDKTests {
         wait(for: [boundDone], timeout: 10)
     }
 }
+
+// MARK: - Signer under the decisions of another mutator
+
+/// The signer under the decisions of another mutator. The signer makes the given mutator's decisions at every
+/// hook and signs the request that mutator processed, so a change it makes is covered by the signature. init()
+/// is unchanged: it makes the CLOSE_FAILURE decisions.
+extension ApproovServiceMiniSDKTests {
+    private func markedFactory() -> SignatureParametersFactory {
+        return ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory().addOptionalHeaders(["X-Mutator"])
+    }
+
+    private func signer(decisions: ApproovServiceMutator) -> ApproovDefaultMessageSigning {
+        return ApproovDefaultMessageSigning(decisions: decisions).setDefaultFactory(markedFactory())
+    }
+
+    private func signatureMemberNames(_ request: ApproovRequest) -> [String] {
+        guard let header = request.headers.first(name: "Signature") else { return [] }
+        return header.split(separator: ",").compactMap { member in
+            member.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+    }
+
+    func testEachDecisionHookIsDelegated() throws {
+        try reinitializeServiceWithTargetHost()
+        let recording = RecordingDecisions()
+        let signing = signer(decisions: recording)
+        ApproovService.setServiceMutator(signing)
+
+        // the direct methods: a REJECTED result does not throw, as the delegate decides
+        setDirective(#"{ "operation": "fetchSecureString", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.precheck())
+        setDirective(#"{ "operation": "fetchApproovToken", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchToken(url: targetURLString + "/direct"))
+        setDirective(#"{ "operation": "fetchSecureString", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchSecureString(key: "some-key", newDef: nil))
+        setDirective(#"{ "operation": "fetchCustomJWT", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchCustomJWT(payload: "{\"a\":1}"))
+
+        // connection checks: the delegate turns them off
+        XCTAssertFalse(signing.handlePinningShouldProcessRequest(hostname: try XCTUnwrap(URL(string: targetURLString)?.host)))
+
+        // the interceptor: the delegate declines the header substitution and accepts the query one
+        _ = try ApproovService.fetchSecureString(key: "own-key", newDef: "secret-value")
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
+        ApproovService.addSubstitutionQueryParam(key: "k")
+        let processed = ApproovService.updateRequestWithApproov(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: targetURLString + "/a?k=own-key")), method: "GET",
+            headers: HTTPHeaders([("Api-Key", "own-key")])))
+        XCTAssertEqual(processed.decision, .ShouldProceed, String(describing: processed.error))
+        XCTAssertEqual(processed.request.headers.first(name: "Api-Key"), "own-key", "the declined substitution was made")
+        XCTAssertEqual(processed.request.url.absoluteString, targetURLString + "/a?k=secret-value")
+        XCTAssertEqual(processed.request.headers.first(name: "X-Mutator"), "recorded")
+        XCTAssertTrue(processed.request.headers.first(name: "Signature-Input")?.contains("\"x-mutator\"") ?? false)
+
+        // a REJECTED token fetch proceeds, signed, as the delegate decides
+        let rejected = try decide(targetURLString + "/b", tokenStatus: "REJECTED", mutator: signing)
+        XCTAssertEqual(rejected.decision, .ShouldProceed, String(describing: rejected.error))
+        XCTAssertEqual(signatureMemberNames(rejected.request), ["install"])
+
+        // a request the delegate does not process gets nothing
+        let skipped = try decide(targetURLString + "/skip", mutator: signing)
+        XCTAssertEqual(skipped.decision, .ShouldIgnore)
+        XCTAssertNil(skipped.request.headers.first(name: "Approov-Token"))
+
+        let calls = recording.calls
+        for expected in ["handlePrecheckResult:REJECTED",
+                         "handleFetchTokenResult:REJECTED",
+                         "handleFetchSecureStringResult:lookup:some-key:REJECTED",
+                         "handleFetchCustomJWTResult:REJECTED",
+                         "handlePinningShouldProcessRequest",
+                         "handleFetchSecureStringResult:definition:own-key:SUCCESS",
+                         "handleInterceptorShouldProcessRequest:/a",
+                         "handleInterceptorFetchTokenResult:SUCCESS",
+                         "handleInterceptorHeaderSubstitutionResult:Api-Key",
+                         "handleInterceptorQueryParamSubstitutionResult:k",
+                         "handleInterceptorProcessedRequest",
+                         "handleInterceptorFetchTokenResult:REJECTED",
+                         "handleInterceptorShouldProcessRequest:/skip"] {
+            XCTAssertTrue(calls.contains(expected), "\(expected) was not delegated: \(calls)")
+        }
+    }
+
+    func testTheDelegatesProcessedRequestRunsFirstAndIsSigned() throws {
+        try reinitializeServiceWithTargetHost()
+        let marking = MarkingDecisions(addQuery: true)
+        let response = try decide(targetURLString + "/a?k=v", mutator: signer(decisions: marking))
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        XCTAssertEqual(marking.calls, 1)
+        XCTAssertEqual(response.request.headers.first(name: "X-Mutator"), "marked")
+        XCTAssertEqual(response.request.url.absoluteString, targetURLString + "/a?k=v&by=delegate")
+        let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
+        XCTAssertTrue(input.contains("\"x-mutator\""), "the delegate's header is not covered: \(input)")
+        XCTAssertEqual(signatureMemberNames(response.request), ["install"])
+    }
+
+    func testInitStillMakesTheCloseFailureDecisions() throws {
+        try reinitializeServiceWithTargetHost()
+        XCTAssertEqual(String(describing: ApproovDefaultMessageSigning()), "ApproovDefaultMessageSigning")
+        for status in ["NO_APPROOV_SERVICE", "NO_NETWORK", "REJECTED", "UNKNOWN_URL"] {
+            let expected = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovCloseFailureMutator.CLOSE_FAILURE)
+            let actual = try decide(targetURLString + "/a", tokenStatus: status,
+                                    mutator: ApproovDefaultMessageSigning().setDefaultFactory(markedFactory()))
+            XCTAssertEqual(actual.decision, expected.decision, status)
+            XCTAssertEqual(String(reflecting: actual.error), String(reflecting: expected.error), status)
+            XCTAssertEqual(actual.request.headers.first(name: "Approov-Token"),
+                           expected.request.headers.first(name: "Approov-Token"), status)
+        }
+        let signed = try decide(targetURLString + "/a", mutator: ApproovDefaultMessageSigning().setDefaultFactory(markedFactory()))
+        XCTAssertEqual(signatureMemberNames(signed.request), ["install"])
+    }
+
+    func testCombinedMakesTheGivenDecisionsAndSignsBoth() throws {
+        try reinitializeServiceWithTargetHost()
+        let proceeded = try decide(targetURLString + "/a", tokenStatus: "NO_NETWORK",
+                                   mutator: ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED))
+        XCTAssertEqual(proceeded.decision, .ShouldProceed, String(describing: proceeded.error))
+        XCTAssertEqual(signatureMemberNames(proceeded.request), ["install", "account"])
+
+        XCTAssertEqual(try decide(targetURLString + "/a", tokenStatus: "NO_NETWORK",
+                                  mutator: ApproovDefaultMessageSigning.combined(decisions: .CLOSE_FAILURE)).decision, .ShouldRetry)
+
+        let recording = RecordingDecisions()
+        XCTAssertEqual(try decide(targetURLString + "/b", tokenStatus: "REJECTED",
+                                  mutator: ApproovDefaultMessageSigning.combined(decisions: recording)).decision, .ShouldProceed)
+        XCTAssertTrue(recording.calls.contains("handleInterceptorFetchTokenResult:REJECTED"), "\(recording.calls)")
+    }
+
+    func testCombinedWithoutDecisionsMakesTheDefaultDecisions() throws {
+        try reinitializeServiceWithTargetHost()
+        for status in ["NO_NETWORK", "REJECTED", "UNKNOWN_URL"] {
+            let expected = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovCloseFailureMutator.DEFAULT)
+            let actual = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovDefaultMessageSigning.combined())
+            XCTAssertEqual(actual.decision, expected.decision, status)
+            XCTAssertEqual(String(reflecting: actual.error), String(reflecting: expected.error), status)
+        }
+        let signed = try decide(targetURLString + "/a", mutator: ApproovDefaultMessageSigning.combined())
+        XCTAssertEqual(signatureMemberNames(signed.request), ["install", "account"])
+    }
+
+    func testCombinedReturnsANewInstanceEachTime() {
+        XCTAssertFalse(ApproovDefaultMessageSigning.combined() === ApproovDefaultMessageSigning.combined())
+        XCTAssertFalse(ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED)
+                       === ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED))
+    }
+}
+
+/// A mutator that marks the request it processed, and that can also add a query parameter to it.
+private final class MarkingDecisions: ApproovServiceMutator {
+    private let count = NIOLockedValueBox(0)
+    private let addQuery: Bool
+    init(addQuery: Bool = false) { self.addQuery = addQuery }
+    var calls: Int { count.withLockedValue { $0 } }
+
+    func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        count.withLockedValue { $0 += 1 }
+        var marked = request
+        marked.headers.replaceOrAdd(name: "X-Mutator", value: "marked")
+        if addQuery {
+            let url = request.url.absoluteString
+            marked.url = URL(string: url + (url.contains("?") ? "&" : "?") + "by=delegate")!
+        }
+        return marked
+    }
+}
+
+/// A mutator that records each decision it is asked for. Each decision differs from the CLOSE_FAILURE one, so
+/// its result shows that the decision was made here.
+private final class RecordingDecisions: ApproovServiceMutator, CustomStringConvertible {
+    private let log = NIOLockedValueBox<[String]>([])
+    var calls: [String] { log.withLockedValue { $0 } }
+    var description: String { return "Recording" }
+
+    private func record(_ call: String) {
+        log.withLockedValue { $0.append(call) }
+    }
+
+    func handlePrecheckResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handlePrecheckResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchTokenResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handleFetchTokenResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchSecureStringResult(_ approovResults: ApproovTokenFetchResult, operation: String, key: String) throws {
+        record("handleFetchSecureStringResult:\(operation):\(key):" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchCustomJWTResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handleFetchCustomJWTResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool {
+        record("handleInterceptorShouldProcessRequest:" + request.url.path)
+        return request.url.path != "/skip"
+    }
+
+    func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        record("handleInterceptorFetchTokenResult:" + ApproovService.statusName(approovResults.status))
+        return true
+    }
+
+    func handleInterceptorHeaderSubstitutionResult(_ approovResults: ApproovTokenFetchResult, header: String) throws -> Bool {
+        record("handleInterceptorHeaderSubstitutionResult:" + header)
+        return false
+    }
+
+    func handleInterceptorQueryParamSubstitutionResult(_ approovResults: ApproovTokenFetchResult, queryKey: String) throws -> Bool {
+        record("handleInterceptorQueryParamSubstitutionResult:" + queryKey)
+        return true
+    }
+
+    func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        record("handleInterceptorProcessedRequest")
+        var recorded = request
+        recorded.headers.replaceOrAdd(name: "X-Mutator", value: "recorded")
+        return recorded
+    }
+
+    func handlePinningShouldProcessRequest(hostname: String) -> Bool {
+        record("handlePinningShouldProcessRequest")
+        return false
+    }
+}
