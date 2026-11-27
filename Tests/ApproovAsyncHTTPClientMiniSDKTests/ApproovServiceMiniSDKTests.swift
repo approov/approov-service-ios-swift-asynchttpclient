@@ -2925,3 +2925,68 @@ private final class RecordingDecisions: ApproovServiceMutator, CustomStringConve
         return false
     }
 }
+
+// MARK: - Missing signature logging
+
+/// A signature that cannot be produced is left out, and the line saying so is written once per process at a
+/// higher level, then at debug level.
+extension ApproovServiceMiniSDKTests {
+    // sends one request with a signer for both signatures, the given ones being unavailable
+    @discardableResult
+    private func sendCombined(installMissing: Bool, accountMissing: Bool) throws -> ApproovRequest {
+        var signer = ApproovDefaultMessageSigning.combined()
+        if installMissing { signer = signer.setInstallMessageSignatureProviderForTesting { _ in "not-base64" } }
+        if accountMissing { signer = signer.setAccountMessageSignatureProviderForTesting { _ in "not-base64" } }
+        let response = try decide(targetURLString + "/a", mutator: signer)
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        return response.request
+    }
+
+    private func levels(_ lines: [(ApproovLogLevel, String)], containing text: String) -> [ApproovLogLevel] {
+        return lines.filter { $0.1.contains(text) }.map { $0.0 }
+    }
+
+    func testAMissingInstallSignatureWarnsOnceThenLogsAtDebug() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            let request = try sendCombined(installMissing: true, accountMissing: false)
+            XCTAssertEqual(request.headers.first(name: "Signature")?.hasPrefix("account="), true)
+            try sendCombined(installMissing: true, accountMissing: false)
+        }
+        XCTAssertEqual(levels(lines, containing: "install message signature unavailable, signed without it"), [.warning, .debug])
+        XCTAssertTrue(levels(lines, containing: "account message signature").isEmpty)
+    }
+
+    func testAMissingAccountSignatureWarnsOnceThenLogsAtDebug() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            try sendCombined(installMissing: false, accountMissing: true)
+            try sendCombined(installMissing: false, accountMissing: true)
+        }
+        XCTAssertEqual(levels(lines, containing: "account message signature unavailable, signed without it"), [.warning, .debug])
+        XCTAssertTrue(levels(lines, containing: "install message signature").isEmpty)
+    }
+
+    func testBothMissingLogsAnErrorOnceThenDebugAndSendsUnsigned() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            let request = try sendCombined(installMissing: true, accountMissing: true)
+            XCTAssertNil(request.headers.first(name: "Signature"))
+            try sendCombined(installMissing: true, accountMissing: true)
+        }
+        let text = "no message signature could be produced, proceeding unsigned: install signature unavailable: account signature unavailable"
+        XCTAssertEqual(levels(lines, containing: text), [.error, .debug])
+        XCTAssertTrue(levels(lines, containing: "signed without it").isEmpty)
+    }
+
+    func testResetRestoresTheFirstTimeBehaviour() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            try sendCombined(installMissing: true, accountMissing: false)
+            try sendCombined(installMissing: true, accountMissing: false)
+            ApproovDefaultMessageSigning.resetMissingSignatureLogsForTesting()
+            try sendCombined(installMissing: true, accountMissing: false)
+        }
+        XCTAssertEqual(levels(lines, containing: "install message signature unavailable, signed without it"), [.warning, .debug, .warning])
+    }
+}

@@ -264,6 +264,7 @@ public class ApproovService {
      * Resets the ApproovService state for testing.
      */
     static func resetForTesting() {
+        ApproovDefaultMessageSigning.resetMissingSignatureLogsForTesting()
         initLock.withLock {
             approovSDKInitialised = false
             _approovConfigString = nil
