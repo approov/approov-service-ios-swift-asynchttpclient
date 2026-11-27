@@ -4,6 +4,19 @@ All notable changes to this package will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
+## [3.7.0] - YYYY-MM-DD
+
+### Changed
+- Uses Approov iOS SDK 3.7.0. The minimum iOS version stays 13.0.
+- The package logs a missing install or account signature as a warning once per process. It logs a request sent unsigned as an error once per process. It logs later occurrences at debug level.
+
+### Added
+- `ApproovDefaultMessageSigning.combined()` and `combined(decisions:)` give a signer that adds both the install and the account signature and makes the decisions you pass, for example `ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED)`. See [message signing](USAGE.md#sign-with-other-decisions).
+
+### Fixed
+- The signed target URI leaves out an explicit default port: `:443` for `https` and `:80` for `http`. So `https://api.example.com:443/v1` and `https://api.example.com/v1` give the same signature.
+- Requests in flight at the same time with different binding header values each have a token bound to their own value.
+
 ## [3.5.4] - 2026-11-21
 
 Changes since 3.5.3. Entries marked **Breaking** need a source change.
