@@ -2620,3 +2620,84 @@ private final class HopRecordingMutator: ApproovServiceMutator {
         return true
     }
 }
+
+// MARK: - Token binding
+
+/// Token binding. The SDK holds one binding value for the process, so the layer sets the value of the binding
+/// header and fetches the token as one step, and each token carries the value of its own request. Requests
+/// without the binding header do not wait for that step.
+extension ApproovServiceMiniSDKTests {
+    private func bound(_ value: String, header: String = "Authorization", path: String = "/binding") throws -> ApproovRequest {
+        return ApproovRequest(url: try XCTUnwrap(URL(string: targetURLString + path)), method: "GET",
+                              headers: HTTPHeaders([(header, value)]))
+    }
+
+    func testConcurrentRequestsEachGetATokenBoundToTheirOwnValue() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "Authorization"
+        let count = 10
+        let rounds = 20
+        var mismatches: [String] = []
+        for round in 0..<rounds {
+            let requests = try (0..<count).map { try bound("Bearer value-\(round)-\($0)") }
+            let tokens = NIOLockedValueBox<[String?]>([String?](repeating: nil, count: count))
+            DispatchQueue.concurrentPerform(iterations: count) { index in
+                let response = ApproovService.updateRequestWithApproov(request: requests[index])
+                let token = response.request.headers.first(name: "Approov-Token")
+                tokens.withLockedValue { $0[index] = token }
+            }
+            for index in 0..<count {
+                let value = "Bearer value-\(round)-\(index)"
+                let token = try XCTUnwrap(tokens.withLockedValue { $0[index] }, "no token for \(value)")
+                if decodeJWTBody(token)?["pay"] as? String != sha256Base64(value) {
+                    mismatches.append(value)
+                }
+            }
+        }
+        XCTAssertEqual(mismatches, [], "\(mismatches.count) of \(count * rounds) tokens were bound to another request's value")
+    }
+
+    func testTheBindingHeaderIsFoundWithoutRegardToCase() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "authorization"
+        MiniSDKAttesterProxyController.clearCallLog()
+        let response = ApproovService.updateRequestWithApproov(request: try bound("Bearer mixed-case"))
+        let token = try XCTUnwrap(response.request.headers.first(name: "Approov-Token"))
+        XCTAssertEqual(decodeJWTBody(token)?["pay"] as? String, sha256Base64("Bearer mixed-case"))
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog().filter { $0.hasPrefix("setDataHashInToken:") },
+                       ["setDataHashInToken:Bearer mixed-case"])
+    }
+
+    func testOnlyARequestWithTheBindingHeaderWaitsForTheBindingStep() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "Authorization"
+        // the binding step is held, as a slow token fetch for a bound request would hold it
+        ApproovService.bindingLock.lock()
+        var held = true
+        defer {
+            if held {
+                ApproovService.bindingLock.unlock()
+            }
+        }
+        let unbound = expectation(description: "unbound request")
+        let boundDone = expectation(description: "bound request")
+        let unboundRequest = ApproovRequest(url: try XCTUnwrap(URL(string: targetURLString + "/unbound")), method: "GET",
+                                            headers: HTTPHeaders())
+        let boundRequest = try bound("Bearer waiting")
+        let boundFinished = NIOLockedValueBox(false)
+        DispatchQueue.global().async {
+            _ = ApproovService.updateRequestWithApproov(request: unboundRequest)
+            unbound.fulfill()
+        }
+        DispatchQueue.global().async {
+            _ = ApproovService.updateRequestWithApproov(request: boundRequest)
+            boundFinished.withLockedValue { $0 = true }
+            boundDone.fulfill()
+        }
+        wait(for: [unbound], timeout: 10)
+        XCTAssertFalse(boundFinished.withLockedValue { $0 }, "a bound request did not wait for the binding step")
+        ApproovService.bindingLock.unlock()
+        held = false
+        wait(for: [boundDone], timeout: 10)
+    }
+}

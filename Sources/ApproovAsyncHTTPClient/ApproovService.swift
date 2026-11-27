@@ -111,6 +111,9 @@ public class ApproovService {
     /** Bind Header string */
     private static var _bindHeader = ""
 
+    /** The lock held while a request sets its token binding value and fetches its token, internal so that a test can hold it */
+    static let bindingLock = NSLock()
+
     /** Approov token default header */
     private static var _approovTokenHeader = "Approov-Token"
 
@@ -647,12 +650,12 @@ public class ApproovService {
 
         var response = ApproovUpdateResponse(request: request, decision: .ShouldFail, sdkMessage: "", error: nil)
 
+        // the value of the binding header, found without regard to case, if the request carries it
         let bindHeader = stateLock.withLock { _bindHeader }
-        if bindHeader != "", let value = request.headers.first(name: bindHeader) {
-            Approov.setDataHashInToken(value)
-        }
+        let bindingValue = bindHeader.isEmpty ? nil : request.headers.first(name: bindHeader)
 
-        let approovResult = Approov.fetchTokenAndWait(url.absoluteString)
+        // fetch the Approov token, bound to the binding value if there is one
+        let approovResult = fetchToken(for: url, bindingValue: bindingValue)
         recordLastARC(approovResult)
         log(.debug, "ApproovService: updateRequest \(loggableURL(url)): \(approovResult.loggableToken())")
         if approovResult.isConfigChanged {
@@ -1191,6 +1194,26 @@ public class ApproovService {
         case .internalError: return "INTERNAL_ERROR"
         @unknown default: return Approov.string(from: status)
         }
+    }
+
+    /**
+     * Fetches the token for a request, bound to the value of the token binding header if the request carries it.
+     * The SDK holds one binding value for the process, so the value is set and the token is fetched under
+     * bindingLock, as otherwise two requests that bind different values can each get a token bound to the value
+     * of the other. Requests without a binding value do not take the lock.
+     *
+     * @param url is the URL to fetch the token for
+     * @param bindingValue is the value of the binding header, or nil if the request does not carry it
+     * @return the token fetch result
+     */
+    private static func fetchToken(for url: URL, bindingValue: String?) -> ApproovTokenFetchResult {
+        guard let bindingValue else {
+            return Approov.fetchTokenAndWait(url.absoluteString)
+        }
+        bindingLock.lock()
+        defer { bindingLock.unlock() }
+        Approov.setDataHashInToken(bindingValue)
+        return Approov.fetchTokenAndWait(url.absoluteString)
     }
 
     /**
