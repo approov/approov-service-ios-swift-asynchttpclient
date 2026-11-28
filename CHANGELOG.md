@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
 
-## [3.7.0] - YYYY-MM-DD
+## [3.7.0] - 2026-11-28
 
 ### Changed
 - Uses Approov iOS SDK 3.7.0. The minimum iOS version stays 13.0.
