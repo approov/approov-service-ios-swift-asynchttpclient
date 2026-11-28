@@ -350,7 +350,7 @@ Creates an instance of `ApproovHTTPClient`.
 let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
 ```
 
-Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`. Keep `certificateVerification` at `.fullVerification`, and do not set a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](USAGE.md#connection-validation) and [redirects](USAGE.md#redirects).
+Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`. Keep `certificateVerification` at `.fullVerification`, and do not set a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](ADVANCED.md#connection-validation) and [redirects](ADVANCED.md#redirects).
 
 ### get / post / patch / put / delete
 Convenience HTTP verbs returning `EventLoopFuture<HTTPClient.Response>`.
@@ -369,7 +369,7 @@ try client.syncShutdown()
 
 ## ApproovDefaultMessageSigning
 
-A service mutator that signs requests that carry the Approov token header. See [message signing](USAGE.md#message-signing).
+A service mutator that signs requests that carry the Approov token header. See [message signing](ADVANCED.md#message-signing).
 
 - `init()`: creates a signer with no factory. It makes the `CLOSE_FAILURE` decisions.
 - `combined()`: returns a new signer whose default factory adds both the install and the account signature. It makes the `.DEFAULT` decisions. Install it with `setServiceMutator`.
