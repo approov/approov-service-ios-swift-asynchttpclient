@@ -14,7 +14,7 @@ import NIOConcurrencyHelpers
 
 /// Integration tests for the ApproovService AsyncHTTPClient service layer.
 final class ApproovServiceMiniSDKTests: XCTestCase {
-    private let validInitialConfig = "#cb-ivol#mAxOF0ekJUOC36J5XWmVmVipOcUoEdMjhPSp2FVtyTo="
+    private let validInitialConfig = "#test-account#mAxOF0ekJUOC36J5XWmVmVipOcUoEdMjhPSp2FVtyTo="
 
     override func setUpWithError() throws {
         try super.setUpWithError()
