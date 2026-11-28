@@ -1242,6 +1242,42 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "each hop fetches its own token")
     }
 
+    // A same-origin 307 or 308 sends the body again, and the hop is signed afresh with a digest of that body.
+    func testABodyRedirectedWith307Or308KeepsItsContentDigest() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(signer())
+        let body = "{\"amount\":42,\"to\":\"account-1\"}"
+        let digest = "sha-256=:" + sha256Base64(body) + ":"
+        for status in [307, 308] {
+            let location = targetURLString + "/after-redirect"
+            let request = try HTTPClient.Request(url: redirectURL(to: location, status: status), method: .POST,
+                                                 headers: HTTPHeaders([("Content-Type", "application/json")]),
+                                                 body: .string(body))
+            let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+            XCTAssertEqual(reply["url"] as? String, location, "\(status)")
+            XCTAssertEqual(reply["method"] as? String, "POST", "\(status)")
+            XCTAssertEqual(reply["body"] as? String, body, "\(status): the body was not sent")
+            XCTAssertNotNil(getHeader(from: reply, key: "Approov-Token"), "\(status)")
+            XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), digest, "\(status): the hop has no digest of its body")
+            XCTAssertTrue(getHeader(from: reply, key: "Signature-Input")?.contains("\"content-digest\"") ?? false,
+                          "\(status): the signature does not cover the digest")
+        }
+    }
+
+    // A body redirected twice keeps its digest on the last hop.
+    func testABodyRedirectedTwiceKeepsItsContentDigest() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(signer())
+        let body = "{\"amount\":9}"
+        let location = targetURLString + "/after-redirect"
+        let second = try redirectURL(to: location, status: 308)
+        let request = try HTTPClient.Request(url: redirectURL(to: second, status: 307), method: .POST, body: .string(body))
+        let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+        XCTAssertEqual(reply["url"] as? String, location)
+        XCTAssertEqual(reply["body"] as? String, body)
+        XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), "sha-256=:" + sha256Base64(body) + ":")
+    }
+
     // The app's redirect settings apply, and the app's delegate sees one response head, the final one.
     func testRedirectSettingsAreTheApps() throws {
         try reinitializeServiceWithTargetHost()
@@ -3045,5 +3081,58 @@ extension ApproovServiceMiniSDKTests {
         XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.CLOSE_FAILURE")
         ApproovService.setServiceMutator(.ALWAYS_PROCEED)
         XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.ALWAYS_PROCEED")
+    }
+}
+
+// MARK: - Signature verification
+
+extension ApproovServiceMiniSDKTests {
+    // the members of a Signature or Signature-Input dictionary, in order, with their values as sent
+    private func dictionaryMembers(_ header: String?) -> [(String, String)] {
+        guard let header else { return [] }
+        var result: [(String, String)] = []
+        var depth = 0, start = header.startIndex
+        for index in header.indices {
+            let c = header[index]
+            if c == "(" { depth += 1 } else if c == ")" { depth -= 1 }
+            if c == "," && depth == 0 {
+                result.append(splitMember(String(header[start..<index])))
+                start = header.index(after: index)
+            }
+        }
+        result.append(splitMember(String(header[start...])))
+        return result
+    }
+
+    private func splitMember(_ member: String) -> (String, String) {
+        let trimmed = member.trimmingCharacters(in: .whitespaces)
+        let equals = trimmed.firstIndex(of: "=")!
+        return (String(trimmed[..<equals]), String(trimmed[trimmed.index(after: equals)...]))
+    }
+
+    func testTheInstallSignatureVerifiesOverTheURLAsSent() throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString + "/p%20a%7Ct%C3%A9?q=%25x%7Cy&z=%20#frag"
+        let signer = ApproovDefaultMessageSigning()
+            .setDefaultFactory(ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory())
+        let response = try decide(url, mutator: signer)
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        let request = response.request
+        let input = try XCTUnwrap(dictionaryMembers(request.headers.first(name: "Signature-Input")).first).1
+        let sent = try XCTUnwrap(request.url.absoluteString.components(separatedBy: "#").first)
+        let token = try XCTUnwrap(request.headers.first(name: "Approov-Token"))
+        let trace = try XCTUnwrap(request.headers.first(name: "Approov-TraceID"))
+        let signatureBase = """
+            "@method": GET
+            "@target-uri": \(sent)
+            "approov-token": \(token)
+            "approov-traceid": \(trace)
+            "@signature-params": \(input)
+            """
+        let signatureValue = try XCTUnwrap(dictionaryMembers(request.headers.first(name: "Signature")).first).1
+        let raw = try XCTUnwrap(Data(base64Encoded: String(signatureValue.dropFirst().dropLast())))
+        let key = try P256.Signing.PublicKey(derRepresentation: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(Approov.getInstallPublicKey()))))
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: raw)
+        XCTAssertTrue(key.isValidSignature(signature, for: Data(signatureBase.utf8)), "the signature does not cover:\n\(signatureBase)")
     }
 }
