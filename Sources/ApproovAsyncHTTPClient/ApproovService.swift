@@ -828,6 +828,8 @@ public class ApproovService {
                 } else {
                     log(.warning, "ApproovService: secure string header \(header) not substituted: the value cannot be carried in a header")
                 }
+            } else if result.status == .unknownKey {
+                // not a secure string key, so the value is the app's own and is left as it is
             } else {
                 request.headers.replaceOrAdd(name: header, value: prefix + statusName(result.status))
             }
@@ -907,6 +909,9 @@ public class ApproovService {
                     continue
                 }
                 replacement = secret
+            } else if result.status == .unknownKey {
+                // not a secure string key, so the value is the app's own and is left as it is
+                continue
             } else {
                 replacement = statusName(result.status)
             }

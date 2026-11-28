@@ -1984,9 +1984,8 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         request.headers.add(name: "Api-Key", value: "placeholder-key")
         
         let reply = fetchNetworkReply(for: request)
-        // A key with no value is UNKNOWN_KEY, and the status is written into the placeholder
-        // (3.5.x kept the placeholder).
-        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "UNKNOWN_KEY")
+        // A key with no value is UNKNOWN_KEY, which is not a secure string key, so the value stays as the app wrote it.
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "placeholder-key")
     }
 
     func testUnprotectedExcludedPinningBehavior() throws {
@@ -2290,7 +2289,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let success = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
         XCTAssertEqual(success.request.headers.first(name: "Api-Key"), "Bearer header-secret")
         let unknown = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer no-such-key")]))
-        XCTAssertEqual(unknown.request.headers.first(name: "Api-Key"), "Bearer UNKNOWN_KEY")
+        XCTAssertEqual(unknown.request.headers.first(name: "Api-Key"), "Bearer no-such-key", "UNKNOWN_KEY leaves the value")
         XCTAssertNil(unknown.error)
         for status in ["REJECTED", "NO_NETWORK", "INTERNAL_ERROR"] {
             let response = try decide(targetURLString, secureStringStatus: status,
@@ -2329,13 +2328,23 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNil(response.request.headers.first(name: "Approov-TraceID"))
     }
 
+    // A value that is not a secure string key (UNKNOWN_KEY) is the app's own and is left as the app wrote it, as in 3.5.x.
+    func testAValueThatIsNotAKeyIsLeftUntouched() throws {
+        try secureStringScenario()
+        let response = try decide(targetURLString + "/a?k=not-a-key",
+                                  headers: HTTPHeaders([("Api-Key", "Bearer user-session-token")]))
+        XCTAssertEqual(response.decision, .ShouldProceed)
+        XCTAssertEqual(response.request.headers.first(name: "Api-Key"), "Bearer user-session-token")
+        XCTAssertEqual(response.request.url.absoluteString, targetURLString + "/a?k=not-a-key")
+    }
+
     // Every query occurrence on its own; a value the URL cannot carry keeps the placeholder.
     func testQuerySubstitutionEveryOccurrenceAndCarriability() throws {
         try secureStringScenario()
         let response = try decide(targetURLString + "/p?k=query-key&x=1&k=amp-key&k=no-such-key")
         let query = try XCTUnwrap(response.request.url.query)
-        XCTAssertEqual(query, "k=query-secret&x=1&k=amp-key&k=UNKNOWN_KEY",
-                       "a value with & cannot be carried, so its placeholder stays")
+        XCTAssertEqual(query, "k=query-secret&x=1&k=amp-key&k=no-such-key",
+                       "a value with & cannot be carried, so its placeholder stays, and UNKNOWN_KEY leaves the value")
     }
 
     // Non-delivery and failure lines are DEBUG only and carry no secret.
