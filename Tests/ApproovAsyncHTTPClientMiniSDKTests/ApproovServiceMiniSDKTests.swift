@@ -14,7 +14,7 @@ import NIOConcurrencyHelpers
 
 /// Integration tests for the ApproovService AsyncHTTPClient service layer.
 final class ApproovServiceMiniSDKTests: XCTestCase {
-    private let validInitialConfig = "#cb-ivol#mAxOF0ekJUOC36J5XWmVmVipOcUoEdMjhPSp2FVtyTo="
+    private let validInitialConfig = "#test-account#mAxOF0ekJUOC36J5XWmVmVipOcUoEdMjhPSp2FVtyTo="
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -1242,6 +1242,42 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
                        "each hop fetches its own token")
     }
 
+    // A same-origin 307 or 308 sends the body again, and the hop is signed afresh with a digest of that body.
+    func testABodyRedirectedWith307Or308KeepsItsContentDigest() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(signer())
+        let body = "{\"amount\":42,\"to\":\"account-1\"}"
+        let digest = "sha-256=:" + sha256Base64(body) + ":"
+        for status in [307, 308] {
+            let location = targetURLString + "/after-redirect"
+            let request = try HTTPClient.Request(url: redirectURL(to: location, status: status), method: .POST,
+                                                 headers: HTTPHeaders([("Content-Type", "application/json")]),
+                                                 body: .string(body))
+            let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+            XCTAssertEqual(reply["url"] as? String, location, "\(status)")
+            XCTAssertEqual(reply["method"] as? String, "POST", "\(status)")
+            XCTAssertEqual(reply["body"] as? String, body, "\(status): the body was not sent")
+            XCTAssertNotNil(getHeader(from: reply, key: "Approov-Token"), "\(status)")
+            XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), digest, "\(status): the hop has no digest of its body")
+            XCTAssertTrue(getHeader(from: reply, key: "Signature-Input")?.contains("\"content-digest\"") ?? false,
+                          "\(status): the signature does not cover the digest")
+        }
+    }
+
+    // A body redirected twice keeps its digest on the last hop.
+    func testABodyRedirectedTwiceKeepsItsContentDigest() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.setServiceMutator(signer())
+        let body = "{\"amount\":9}"
+        let location = targetURLString + "/after-redirect"
+        let second = try redirectURL(to: location, status: 308)
+        let request = try HTTPClient.Request(url: redirectURL(to: second, status: 307), method: .POST, body: .string(body))
+        let reply = try XCTUnwrap(fetchNetworkReply(for: request))
+        XCTAssertEqual(reply["url"] as? String, location)
+        XCTAssertEqual(reply["body"] as? String, body)
+        XCTAssertEqual(getHeader(from: reply, key: "Content-Digest"), "sha-256=:" + sha256Base64(body) + ":")
+    }
+
     // The app's redirect settings apply, and the app's delegate sees one response head, the final one.
     func testRedirectSettingsAreTheApps() throws {
         try reinitializeServiceWithTargetHost()
@@ -1984,9 +2020,8 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         request.headers.add(name: "Api-Key", value: "placeholder-key")
         
         let reply = fetchNetworkReply(for: request)
-        // A key with no value is UNKNOWN_KEY, and the status is written into the placeholder
-        // (3.5.x kept the placeholder).
-        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "UNKNOWN_KEY")
+        // A key with no value is UNKNOWN_KEY, which is not a secure string key, so the value stays as the app wrote it.
+        XCTAssertEqual(getHeader(from: reply, key: "Api-Key"), "placeholder-key")
     }
 
     func testUnprotectedExcludedPinningBehavior() throws {
@@ -2290,7 +2325,7 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         let success = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer header-key")]))
         XCTAssertEqual(success.request.headers.first(name: "Api-Key"), "Bearer header-secret")
         let unknown = try decide(targetURLString, headers: HTTPHeaders([("Api-Key", "Bearer no-such-key")]))
-        XCTAssertEqual(unknown.request.headers.first(name: "Api-Key"), "Bearer UNKNOWN_KEY")
+        XCTAssertEqual(unknown.request.headers.first(name: "Api-Key"), "Bearer no-such-key", "UNKNOWN_KEY leaves the value")
         XCTAssertNil(unknown.error)
         for status in ["REJECTED", "NO_NETWORK", "INTERNAL_ERROR"] {
             let response = try decide(targetURLString, secureStringStatus: status,
@@ -2329,13 +2364,23 @@ final class ApproovServiceMiniSDKTests: XCTestCase {
         XCTAssertNil(response.request.headers.first(name: "Approov-TraceID"))
     }
 
+    // A value that is not a secure string key (UNKNOWN_KEY) is the app's own and is left as the app wrote it, as in 3.5.x.
+    func testAValueThatIsNotAKeyIsLeftUntouched() throws {
+        try secureStringScenario()
+        let response = try decide(targetURLString + "/a?k=not-a-key",
+                                  headers: HTTPHeaders([("Api-Key", "Bearer user-session-token")]))
+        XCTAssertEqual(response.decision, .ShouldProceed)
+        XCTAssertEqual(response.request.headers.first(name: "Api-Key"), "Bearer user-session-token")
+        XCTAssertEqual(response.request.url.absoluteString, targetURLString + "/a?k=not-a-key")
+    }
+
     // Every query occurrence on its own; a value the URL cannot carry keeps the placeholder.
     func testQuerySubstitutionEveryOccurrenceAndCarriability() throws {
         try secureStringScenario()
         let response = try decide(targetURLString + "/p?k=query-key&x=1&k=amp-key&k=no-such-key")
         let query = try XCTUnwrap(response.request.url.query)
-        XCTAssertEqual(query, "k=query-secret&x=1&k=amp-key&k=UNKNOWN_KEY",
-                       "a value with & cannot be carried, so its placeholder stays")
+        XCTAssertEqual(query, "k=query-secret&x=1&k=amp-key&k=no-such-key",
+                       "a value with & cannot be carried, so its placeholder stays, and UNKNOWN_KEY leaves the value")
     }
 
     // Non-delivery and failure lines are DEBUG only and carry no secret.
@@ -2618,5 +2663,476 @@ private final class HopRecordingMutator: ApproovServiceMutator {
         urls.withLockedValue { $0.append(request.url.absoluteString) }
         onRequest(request)
         return true
+    }
+}
+
+// MARK: - Token binding
+
+/// Token binding. The SDK holds one binding value for the process, so the layer sets the value of the binding
+/// header and fetches the token as one step, and each token carries the value of its own request. Requests
+/// without the binding header do not wait for that step.
+extension ApproovServiceMiniSDKTests {
+    private func bound(_ value: String, header: String = "Authorization", path: String = "/binding") throws -> ApproovRequest {
+        return ApproovRequest(url: try XCTUnwrap(URL(string: targetURLString + path)), method: "GET",
+                              headers: HTTPHeaders([(header, value)]))
+    }
+
+    func testConcurrentRequestsEachGetATokenBoundToTheirOwnValue() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "Authorization"
+        let count = 10
+        let rounds = 20
+        var mismatches: [String] = []
+        for round in 0..<rounds {
+            let requests = try (0..<count).map { try bound("Bearer value-\(round)-\($0)") }
+            let tokens = NIOLockedValueBox<[String?]>([String?](repeating: nil, count: count))
+            DispatchQueue.concurrentPerform(iterations: count) { index in
+                let response = ApproovService.updateRequestWithApproov(request: requests[index])
+                let token = response.request.headers.first(name: "Approov-Token")
+                tokens.withLockedValue { $0[index] = token }
+            }
+            for index in 0..<count {
+                let value = "Bearer value-\(round)-\(index)"
+                let token = try XCTUnwrap(tokens.withLockedValue { $0[index] }, "no token for \(value)")
+                if decodeJWTBody(token)?["pay"] as? String != sha256Base64(value) {
+                    mismatches.append(value)
+                }
+            }
+        }
+        XCTAssertEqual(mismatches, [], "\(mismatches.count) of \(count * rounds) tokens were bound to another request's value")
+    }
+
+    func testTheBindingHeaderIsFoundWithoutRegardToCase() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "authorization"
+        MiniSDKAttesterProxyController.clearCallLog()
+        let response = ApproovService.updateRequestWithApproov(request: try bound("Bearer mixed-case"))
+        let token = try XCTUnwrap(response.request.headers.first(name: "Approov-Token"))
+        XCTAssertEqual(decodeJWTBody(token)?["pay"] as? String, sha256Base64("Bearer mixed-case"))
+        XCTAssertEqual(MiniSDKAttesterProxyController.callLog().filter { $0.hasPrefix("setDataHashInToken:") },
+                       ["setDataHashInToken:Bearer mixed-case"])
+    }
+
+    func testOnlyARequestWithTheBindingHeaderWaitsForTheBindingStep() throws {
+        try reinitializeServiceWithTargetHost()
+        ApproovService.bindHeader = "Authorization"
+        // the binding step is held, as a slow token fetch for a bound request would hold it
+        ApproovService.bindingLock.lock()
+        var held = true
+        defer {
+            if held {
+                ApproovService.bindingLock.unlock()
+            }
+        }
+        let unbound = expectation(description: "unbound request")
+        let boundDone = expectation(description: "bound request")
+        let unboundRequest = ApproovRequest(url: try XCTUnwrap(URL(string: targetURLString + "/unbound")), method: "GET",
+                                            headers: HTTPHeaders())
+        let boundRequest = try bound("Bearer waiting")
+        let boundFinished = NIOLockedValueBox(false)
+        DispatchQueue.global().async {
+            _ = ApproovService.updateRequestWithApproov(request: unboundRequest)
+            unbound.fulfill()
+        }
+        DispatchQueue.global().async {
+            _ = ApproovService.updateRequestWithApproov(request: boundRequest)
+            boundFinished.withLockedValue { $0 = true }
+            boundDone.fulfill()
+        }
+        wait(for: [unbound], timeout: 10)
+        XCTAssertFalse(boundFinished.withLockedValue { $0 }, "a bound request did not wait for the binding step")
+        ApproovService.bindingLock.unlock()
+        held = false
+        wait(for: [boundDone], timeout: 10)
+    }
+}
+
+// MARK: - Signer under the decisions of another mutator
+
+/// The signer under the decisions of another mutator. The signer makes the given mutator's decisions at every
+/// hook and signs the request that mutator processed, so a change it makes is covered by the signature. init()
+/// is unchanged: it makes the CLOSE_FAILURE decisions.
+extension ApproovServiceMiniSDKTests {
+    private func markedFactory() -> SignatureParametersFactory {
+        return ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory().addOptionalHeaders(["X-Mutator"])
+    }
+
+    private func signer(decisions: ApproovServiceMutator) -> ApproovDefaultMessageSigning {
+        return ApproovDefaultMessageSigning(decisions: decisions).setDefaultFactory(markedFactory())
+    }
+
+    private func signatureMemberNames(_ request: ApproovRequest) -> [String] {
+        guard let header = request.headers.first(name: "Signature") else { return [] }
+        return header.split(separator: ",").compactMap { member in
+            member.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+    }
+
+    func testEachDecisionHookIsDelegated() throws {
+        try reinitializeServiceWithTargetHost()
+        let recording = RecordingDecisions()
+        let signing = signer(decisions: recording)
+        ApproovService.setServiceMutator(signing)
+
+        // the direct methods: a REJECTED result does not throw, as the delegate decides
+        setDirective(#"{ "operation": "fetchSecureString", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.precheck())
+        setDirective(#"{ "operation": "fetchApproovToken", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchToken(url: targetURLString + "/direct"))
+        setDirective(#"{ "operation": "fetchSecureString", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchSecureString(key: "some-key", newDef: nil))
+        setDirective(#"{ "operation": "fetchCustomJWT", "response": { "status": "REJECTED" } }"#)
+        XCTAssertNoThrow(try ApproovService.fetchCustomJWT(payload: "{\"a\":1}"))
+
+        // connection checks: the delegate turns them off
+        XCTAssertFalse(signing.handlePinningShouldProcessRequest(hostname: try XCTUnwrap(URL(string: targetURLString)?.host)))
+
+        // the interceptor: the delegate declines the header substitution and accepts the query one
+        _ = try ApproovService.fetchSecureString(key: "own-key", newDef: "secret-value")
+        ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
+        ApproovService.addSubstitutionQueryParam(key: "k")
+        let processed = ApproovService.updateRequestWithApproov(request: ApproovRequest(
+            url: try XCTUnwrap(URL(string: targetURLString + "/a?k=own-key")), method: "GET",
+            headers: HTTPHeaders([("Api-Key", "own-key")])))
+        XCTAssertEqual(processed.decision, .ShouldProceed, String(describing: processed.error))
+        XCTAssertEqual(processed.request.headers.first(name: "Api-Key"), "own-key", "the declined substitution was made")
+        XCTAssertEqual(processed.request.url.absoluteString, targetURLString + "/a?k=secret-value")
+        XCTAssertEqual(processed.request.headers.first(name: "X-Mutator"), "recorded")
+        XCTAssertTrue(processed.request.headers.first(name: "Signature-Input")?.contains("\"x-mutator\"") ?? false)
+
+        // a REJECTED token fetch proceeds, signed, as the delegate decides
+        let rejected = try decide(targetURLString + "/b", tokenStatus: "REJECTED", mutator: signing)
+        XCTAssertEqual(rejected.decision, .ShouldProceed, String(describing: rejected.error))
+        XCTAssertEqual(signatureMemberNames(rejected.request), ["install"])
+
+        // a request the delegate does not process gets nothing
+        let skipped = try decide(targetURLString + "/skip", mutator: signing)
+        XCTAssertEqual(skipped.decision, .ShouldIgnore)
+        XCTAssertNil(skipped.request.headers.first(name: "Approov-Token"))
+
+        let calls = recording.calls
+        for expected in ["handlePrecheckResult:REJECTED",
+                         "handleFetchTokenResult:REJECTED",
+                         "handleFetchSecureStringResult:lookup:some-key:REJECTED",
+                         "handleFetchCustomJWTResult:REJECTED",
+                         "handlePinningShouldProcessRequest",
+                         "handleFetchSecureStringResult:definition:own-key:SUCCESS",
+                         "handleInterceptorShouldProcessRequest:/a",
+                         "handleInterceptorFetchTokenResult:SUCCESS",
+                         "handleInterceptorHeaderSubstitutionResult:Api-Key",
+                         "handleInterceptorQueryParamSubstitutionResult:k",
+                         "handleInterceptorProcessedRequest",
+                         "handleInterceptorFetchTokenResult:REJECTED",
+                         "handleInterceptorShouldProcessRequest:/skip"] {
+            XCTAssertTrue(calls.contains(expected), "\(expected) was not delegated: \(calls)")
+        }
+    }
+
+    func testTheDelegatesProcessedRequestRunsFirstAndIsSigned() throws {
+        try reinitializeServiceWithTargetHost()
+        let marking = MarkingDecisions(addQuery: true)
+        let response = try decide(targetURLString + "/a?k=v", mutator: signer(decisions: marking))
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        XCTAssertEqual(marking.calls, 1)
+        XCTAssertEqual(response.request.headers.first(name: "X-Mutator"), "marked")
+        XCTAssertEqual(response.request.url.absoluteString, targetURLString + "/a?k=v&by=delegate")
+        let input = try XCTUnwrap(response.request.headers.first(name: "Signature-Input"))
+        XCTAssertTrue(input.contains("\"x-mutator\""), "the delegate's header is not covered: \(input)")
+        XCTAssertEqual(signatureMemberNames(response.request), ["install"])
+    }
+
+    func testInitStillMakesTheCloseFailureDecisions() throws {
+        try reinitializeServiceWithTargetHost()
+        XCTAssertEqual(String(describing: ApproovDefaultMessageSigning()), "ApproovDefaultMessageSigning")
+        for status in ["NO_APPROOV_SERVICE", "NO_NETWORK", "REJECTED", "UNKNOWN_URL"] {
+            let expected = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovCloseFailureMutator.CLOSE_FAILURE)
+            let actual = try decide(targetURLString + "/a", tokenStatus: status,
+                                    mutator: ApproovDefaultMessageSigning().setDefaultFactory(markedFactory()))
+            XCTAssertEqual(actual.decision, expected.decision, status)
+            XCTAssertEqual(String(reflecting: actual.error), String(reflecting: expected.error), status)
+            XCTAssertEqual(actual.request.headers.first(name: "Approov-Token"),
+                           expected.request.headers.first(name: "Approov-Token"), status)
+        }
+        let signed = try decide(targetURLString + "/a", mutator: ApproovDefaultMessageSigning().setDefaultFactory(markedFactory()))
+        XCTAssertEqual(signatureMemberNames(signed.request), ["install"])
+    }
+
+    func testCombinedMakesTheGivenDecisionsAndSignsBoth() throws {
+        try reinitializeServiceWithTargetHost()
+        let proceeded = try decide(targetURLString + "/a", tokenStatus: "NO_NETWORK",
+                                   mutator: ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED))
+        XCTAssertEqual(proceeded.decision, .ShouldProceed, String(describing: proceeded.error))
+        XCTAssertEqual(signatureMemberNames(proceeded.request), ["install", "account"])
+
+        XCTAssertEqual(try decide(targetURLString + "/a", tokenStatus: "NO_NETWORK",
+                                  mutator: ApproovDefaultMessageSigning.combined(decisions: .CLOSE_FAILURE)).decision, .ShouldRetry)
+
+        let recording = RecordingDecisions()
+        XCTAssertEqual(try decide(targetURLString + "/b", tokenStatus: "REJECTED",
+                                  mutator: ApproovDefaultMessageSigning.combined(decisions: recording)).decision, .ShouldProceed)
+        XCTAssertTrue(recording.calls.contains("handleInterceptorFetchTokenResult:REJECTED"), "\(recording.calls)")
+    }
+
+    func testCombinedWithoutDecisionsMakesTheDefaultDecisions() throws {
+        try reinitializeServiceWithTargetHost()
+        for status in ["NO_NETWORK", "REJECTED", "UNKNOWN_URL"] {
+            let expected = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovCloseFailureMutator.DEFAULT)
+            let actual = try decide(targetURLString + "/a", tokenStatus: status, mutator: ApproovDefaultMessageSigning.combined())
+            XCTAssertEqual(actual.decision, expected.decision, status)
+            XCTAssertEqual(String(reflecting: actual.error), String(reflecting: expected.error), status)
+        }
+        let signed = try decide(targetURLString + "/a", mutator: ApproovDefaultMessageSigning.combined())
+        XCTAssertEqual(signatureMemberNames(signed.request), ["install", "account"])
+    }
+
+    func testCombinedReturnsANewInstanceEachTime() {
+        XCTAssertFalse(ApproovDefaultMessageSigning.combined() === ApproovDefaultMessageSigning.combined())
+        XCTAssertFalse(ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED)
+                       === ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED))
+    }
+}
+
+/// A mutator that marks the request it processed, and that can also add a query parameter to it.
+private final class MarkingDecisions: ApproovServiceMutator {
+    private let count = NIOLockedValueBox(0)
+    private let addQuery: Bool
+    init(addQuery: Bool = false) { self.addQuery = addQuery }
+    var calls: Int { count.withLockedValue { $0 } }
+
+    func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        count.withLockedValue { $0 += 1 }
+        var marked = request
+        marked.headers.replaceOrAdd(name: "X-Mutator", value: "marked")
+        if addQuery {
+            let url = request.url.absoluteString
+            marked.url = URL(string: url + (url.contains("?") ? "&" : "?") + "by=delegate")!
+        }
+        return marked
+    }
+}
+
+/// A mutator that records each decision it is asked for. Each decision differs from the CLOSE_FAILURE one, so
+/// its result shows that the decision was made here.
+private final class RecordingDecisions: ApproovServiceMutator, CustomStringConvertible {
+    private let log = NIOLockedValueBox<[String]>([])
+    var calls: [String] { log.withLockedValue { $0 } }
+    var description: String { return "Recording" }
+
+    private func record(_ call: String) {
+        log.withLockedValue { $0.append(call) }
+    }
+
+    func handlePrecheckResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handlePrecheckResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchTokenResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handleFetchTokenResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchSecureStringResult(_ approovResults: ApproovTokenFetchResult, operation: String, key: String) throws {
+        record("handleFetchSecureStringResult:\(operation):\(key):" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleFetchCustomJWTResult(_ approovResults: ApproovTokenFetchResult) throws {
+        record("handleFetchCustomJWTResult:" + ApproovService.statusName(approovResults.status))
+    }
+
+    func handleInterceptorShouldProcessRequest(_ request: ApproovRequest) throws -> Bool {
+        record("handleInterceptorShouldProcessRequest:" + request.url.path)
+        return request.url.path != "/skip"
+    }
+
+    func handleInterceptorFetchTokenResult(_ approovResults: ApproovTokenFetchResult, url: String) throws -> Bool {
+        record("handleInterceptorFetchTokenResult:" + ApproovService.statusName(approovResults.status))
+        return true
+    }
+
+    func handleInterceptorHeaderSubstitutionResult(_ approovResults: ApproovTokenFetchResult, header: String) throws -> Bool {
+        record("handleInterceptorHeaderSubstitutionResult:" + header)
+        return false
+    }
+
+    func handleInterceptorQueryParamSubstitutionResult(_ approovResults: ApproovTokenFetchResult, queryKey: String) throws -> Bool {
+        record("handleInterceptorQueryParamSubstitutionResult:" + queryKey)
+        return true
+    }
+
+    func handleInterceptorProcessedRequest(_ request: ApproovRequest, changes: ApproovRequestMutations) throws -> ApproovRequest {
+        record("handleInterceptorProcessedRequest")
+        var recorded = request
+        recorded.headers.replaceOrAdd(name: "X-Mutator", value: "recorded")
+        return recorded
+    }
+
+    func handlePinningShouldProcessRequest(hostname: String) -> Bool {
+        record("handlePinningShouldProcessRequest")
+        return false
+    }
+}
+
+// MARK: - Missing signature logging
+
+/// A signature that cannot be produced is left out, and the line saying so is written once per process at a
+/// higher level, then at debug level.
+extension ApproovServiceMiniSDKTests {
+    // sends one request with a signer for both signatures, the given ones being unavailable
+    @discardableResult
+    private func sendCombined(installMissing: Bool, accountMissing: Bool) throws -> ApproovRequest {
+        var signer = ApproovDefaultMessageSigning.combined()
+        if installMissing { signer = signer.setInstallMessageSignatureProviderForTesting { _ in "not-base64" } }
+        if accountMissing { signer = signer.setAccountMessageSignatureProviderForTesting { _ in "not-base64" } }
+        let response = try decide(targetURLString + "/a", mutator: signer)
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        return response.request
+    }
+
+    private func levels(_ lines: [(ApproovLogLevel, String)], containing text: String) -> [ApproovLogLevel] {
+        return lines.filter { $0.1.contains(text) }.map { $0.0 }
+    }
+
+    func testAMissingInstallSignatureWarnsOnceThenLogsAtDebug() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            let request = try sendCombined(installMissing: true, accountMissing: false)
+            XCTAssertEqual(request.headers.first(name: "Signature")?.hasPrefix("account="), true)
+            try sendCombined(installMissing: true, accountMissing: false)
+        }
+        XCTAssertEqual(levels(lines, containing: "install message signature unavailable, signed without it"), [.warning, .debug])
+        XCTAssertTrue(levels(lines, containing: "account message signature").isEmpty)
+    }
+
+    func testAMissingAccountSignatureWarnsOnceThenLogsAtDebug() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            try sendCombined(installMissing: false, accountMissing: true)
+            try sendCombined(installMissing: false, accountMissing: true)
+        }
+        XCTAssertEqual(levels(lines, containing: "account message signature unavailable, signed without it"), [.warning, .debug])
+        XCTAssertTrue(levels(lines, containing: "install message signature").isEmpty)
+    }
+
+    func testBothMissingLogsAnErrorOnceThenDebugAndSendsUnsigned() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            let request = try sendCombined(installMissing: true, accountMissing: true)
+            XCTAssertNil(request.headers.first(name: "Signature"))
+            try sendCombined(installMissing: true, accountMissing: true)
+        }
+        let text = "no message signature could be produced, proceeding unsigned: install signature unavailable: account signature unavailable"
+        XCTAssertEqual(levels(lines, containing: text), [.error, .debug])
+        XCTAssertTrue(levels(lines, containing: "signed without it").isEmpty)
+    }
+
+    func testResetRestoresTheFirstTimeBehaviour() throws {
+        try reinitializeServiceWithTargetHost()
+        let lines = try captureLogs(level: .debug) {
+            try sendCombined(installMissing: true, accountMissing: false)
+            try sendCombined(installMissing: true, accountMissing: false)
+            ApproovDefaultMessageSigning.resetMissingSignatureLogsForTesting()
+            try sendCombined(installMissing: true, accountMissing: false)
+        }
+        XCTAssertEqual(levels(lines, containing: "install message signature unavailable, signed without it"), [.warning, .debug, .warning])
+    }
+
+    func testTargetUriLeavesOutADefaultPort() throws {
+        let targetUris = [
+            ("https://api.example.com:443/", "https://api.example.com/"),
+            ("https://api.example.com:443/v1?a=1", "https://api.example.com/v1?a=1"),
+            ("http://api.example.com:80/v1", "http://api.example.com/v1"),
+            ("https://api.example.com:8443/v1", "https://api.example.com:8443/v1"),
+            ("http://api.example.com:443/v1", "http://api.example.com:443/v1"),
+            ("https://api.example.com/v1%2Fx?q=a%20b#frag", "https://api.example.com/v1%2Fx?q=a%20b"),
+        ]
+        for (sent, signed) in targetUris {
+            let provider = ApproovAsyncHTTPClientComponentProvider(request: ApproovRequest(
+                url: try XCTUnwrap(URL(string: sent)), method: "GET", headers: HTTPHeaders()))
+            XCTAssertEqual(provider.getTargetUri(), signed, sent)
+        }
+    }
+}
+
+// MARK: - Status names and the URL in errors
+
+extension ApproovServiceMiniSDKTests {
+    func testTheTokenFailureShowsTheURLWithoutUserInfoQueryOrFragment() throws {
+        try reinitializeServiceWithTargetHost()
+        let host = try XCTUnwrap(URL(string: targetURLString)?.host)
+        let url = "https://user:password@\(host):8443/v1/items?api_key=query-secret#part"
+        let network = try decide(url, tokenStatus: "NO_NETWORK")
+        XCTAssertEqual(network.error?.localizedDescription, "Approov token fetch for https://\(host):8443/v1/items: NO_NETWORK")
+        let rejected = try decide(url, tokenStatus: "REJECTED")
+        XCTAssertEqual(rejected.error?.localizedDescription, "Approov token fetch for https://\(host):8443/v1/items: REJECTED")
+    }
+
+    func testTheLoggableURLKeepsOnlySchemeHostPortAndPath() {
+        XCTAssertEqual(ApproovService.loggableURL("https://u:p@Example.com:443/a/b?k=v#f"), "https://Example.com/a/b")
+        XCTAssertEqual(ApproovService.loggableURL("http://example.com:8080/a%20b?k=v"), "http://example.com:8080/a%20b")
+        XCTAssertEqual(ApproovService.loggableURL("https://[::1]:8443/p?k=v"), "https://[::1]:8443/p")
+        XCTAssertEqual(ApproovService.loggableURL("ftp://example.com/a?k=v"), "(URL not shown)")
+        XCTAssertEqual(ApproovService.loggableURL("not a url ?k=v"), "(URL not shown)")
+    }
+
+    func testTheDocumentedFormsCompile() {
+        // the forms the deprecation message, CHANGELOG and ADVANCED give
+        ApproovService.setServiceMutator(.DEFAULT)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.CLOSE_FAILURE")
+        ApproovService.setServiceMutator(.CLOSE_FAILURE)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.CLOSE_FAILURE")
+        ApproovService.setServiceMutator(.ALWAYS_PROCEED)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.ALWAYS_PROCEED")
+    }
+}
+
+// MARK: - Signature verification
+
+extension ApproovServiceMiniSDKTests {
+    // the members of a Signature or Signature-Input dictionary, in order, with their values as sent
+    private func dictionaryMembers(_ header: String?) -> [(String, String)] {
+        guard let header else { return [] }
+        var result: [(String, String)] = []
+        var depth = 0, start = header.startIndex
+        for index in header.indices {
+            let c = header[index]
+            if c == "(" { depth += 1 } else if c == ")" { depth -= 1 }
+            if c == "," && depth == 0 {
+                result.append(splitMember(String(header[start..<index])))
+                start = header.index(after: index)
+            }
+        }
+        result.append(splitMember(String(header[start...])))
+        return result
+    }
+
+    private func splitMember(_ member: String) -> (String, String) {
+        let trimmed = member.trimmingCharacters(in: .whitespaces)
+        let equals = trimmed.firstIndex(of: "=")!
+        return (String(trimmed[..<equals]), String(trimmed[trimmed.index(after: equals)...]))
+    }
+
+    func testTheInstallSignatureVerifiesOverTheURLAsSent() throws {
+        try reinitializeServiceWithTargetHost()
+        let url = targetURLString + "/p%20a%7Ct%C3%A9?q=%25x%7Cy&z=%20#frag"
+        let signer = ApproovDefaultMessageSigning()
+            .setDefaultFactory(ApproovDefaultMessageSigning.generateDefaultSignatureParametersFactory())
+        let response = try decide(url, mutator: signer)
+        XCTAssertEqual(response.decision, .ShouldProceed, String(describing: response.error))
+        let request = response.request
+        let input = try XCTUnwrap(dictionaryMembers(request.headers.first(name: "Signature-Input")).first).1
+        let sent = try XCTUnwrap(request.url.absoluteString.components(separatedBy: "#").first)
+        let token = try XCTUnwrap(request.headers.first(name: "Approov-Token"))
+        let trace = try XCTUnwrap(request.headers.first(name: "Approov-TraceID"))
+        let signatureBase = """
+            "@method": GET
+            "@target-uri": \(sent)
+            "approov-token": \(token)
+            "approov-traceid": \(trace)
+            "@signature-params": \(input)
+            """
+        let signatureValue = try XCTUnwrap(dictionaryMembers(request.headers.first(name: "Signature")).first).1
+        let raw = try XCTUnwrap(Data(base64Encoded: String(signatureValue.dropFirst().dropLast())))
+        let key = try P256.Signing.PublicKey(derRepresentation: try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(Approov.getInstallPublicKey()))))
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: raw)
+        XCTAssertTrue(key.isValidSignature(signature, for: Data(signatureBase.utf8)), "the signature does not cover:\n\(signatureBase)")
     }
 }

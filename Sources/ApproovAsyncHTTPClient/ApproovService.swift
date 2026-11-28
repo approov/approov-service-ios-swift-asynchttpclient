@@ -111,6 +111,9 @@ public class ApproovService {
     /** Bind Header string */
     private static var _bindHeader = ""
 
+    /** The lock held while a request sets its token binding value and fetches its token, internal so that a test can hold it */
+    static let bindingLock = NSLock()
+
     /** Approov token default header */
     private static var _approovTokenHeader = "Approov-Token"
 
@@ -189,16 +192,32 @@ public class ApproovService {
     }
 
     /**
-     * Gets the form of a URL for a log line: scheme, host, port and path. It has no user info, query or
-     * fragment.
+     * Gets the form of a URL that may be logged or put in an error message: scheme, host, any port that is not
+     * the default for the scheme, and path, without the user info, query or fragment, which may carry personal
+     * data or a secure string. A string that is not an http or https URL is not shown.
+     *
+     * @param url is the URL string
+     * @return the loggable form of the URL
      */
-    static func loggableURL(_ url: URL) -> String {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let scheme = components.scheme, let host = components.host else {
-            return "<url>"
+    static func loggableURL(_ url: String) -> String {
+        guard var components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty else {
+            return "(URL not shown)"
         }
-        let port = components.port.map { ":\($0)" } ?? ""
-        return "\(scheme)://\(host)\(port)\(components.percentEncodedPath)"
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        if components.port == (scheme == "https" ? 443 : 80) {
+            components.port = nil
+        }
+        return components.string ?? "(URL not shown)"
+    }
+
+    /** The loggable form of a URL, as loggableURL(_: String) gives it. */
+    static func loggableURL(_ url: URL) -> String {
+        return loggableURL(url.absoluteString)
     }
 
     /**
@@ -251,7 +270,7 @@ public class ApproovService {
 
             approovSDKInitialised = true
             if isEnabled {
-                Approov.setUserProperty("approov-service-asynchttpclient/3.5.4")
+                Approov.setUserProperty("approov-service-asynchttpclient/3.7.0")
             }
             TLSConfiguration.setVerifyPinningBlock(newValue: ApproovPinningVerifier.verifyPinning)
         }
@@ -261,6 +280,7 @@ public class ApproovService {
      * Resets the ApproovService state for testing.
      */
     static func resetForTesting() {
+        ApproovDefaultMessageSigning.resetMissingSignatureLogsForTesting()
         initLock.withLock {
             approovSDKInitialised = false
             _approovConfigString = nil
@@ -647,12 +667,12 @@ public class ApproovService {
 
         var response = ApproovUpdateResponse(request: request, decision: .ShouldFail, sdkMessage: "", error: nil)
 
+        // the value of the binding header, found without regard to case, if the request carries it
         let bindHeader = stateLock.withLock { _bindHeader }
-        if bindHeader != "", let value = request.headers.first(name: bindHeader) {
-            Approov.setDataHashInToken(value)
-        }
+        let bindingValue = bindHeader.isEmpty ? nil : request.headers.first(name: bindHeader)
 
-        let approovResult = Approov.fetchTokenAndWait(url.absoluteString)
+        // fetch the Approov token, bound to the binding value if there is one
+        let approovResult = fetchToken(for: url, bindingValue: bindingValue)
         recordLastARC(approovResult)
         log(.debug, "ApproovService: updateRequest \(loggableURL(url)): \(approovResult.loggableToken())")
         if approovResult.isConfigChanged {
@@ -824,6 +844,8 @@ public class ApproovService {
                 } else {
                     log(.warning, "ApproovService: secure string header \(header) not substituted: the value cannot be carried in a header")
                 }
+            } else if result.status == .unknownKey {
+                // not a secure string key, so the value is the app's own and is left as it is
             } else {
                 request.headers.replaceOrAdd(name: header, value: prefix + statusName(result.status))
             }
@@ -903,6 +925,9 @@ public class ApproovService {
                     continue
                 }
                 replacement = secret
+            } else if result.status == .unknownKey {
+                // not a secure string key, so the value is the app's own and is left as it is
+                continue
             } else {
                 replacement = statusName(result.status)
             }
@@ -1194,6 +1219,26 @@ public class ApproovService {
     }
 
     /**
+     * Fetches the token for a request, bound to the value of the token binding header if the request carries it.
+     * The SDK holds one binding value for the process, so the value is set and the token is fetched under
+     * bindingLock, as otherwise two requests that bind different values can each get a token bound to the value
+     * of the other. Requests without a binding value do not take the lock.
+     *
+     * @param url is the URL to fetch the token for
+     * @param bindingValue is the value of the binding header, or nil if the request does not carry it
+     * @return the token fetch result
+     */
+    private static func fetchToken(for url: URL, bindingValue: String?) -> ApproovTokenFetchResult {
+        guard let bindingValue else {
+            return Approov.fetchTokenAndWait(url.absoluteString)
+        }
+        bindingLock.lock()
+        defer { bindingLock.unlock() }
+        Approov.setDataHashInToken(bindingValue)
+        return Approov.fetchTokenAndWait(url.absoluteString)
+    }
+
+    /**
      * Records the ARC of a fetch result as the most recent one. An empty ARC clears the earlier value,
      * because the ARC belongs to the last fetch.
      */
@@ -1224,18 +1269,13 @@ public class ApproovService {
     }
 
     /**
-     * The server adjusted time from the SDK, found at run time because SDK 3.5.3 does not have the method. If it
-     * is unavailable, the device clock is used and one warning is logged.
+     * The server adjusted time from the SDK. If the SDK gives no time, because it is not initialized, the device
+     * clock is used and one warning is logged.
      */
     static func serverAdjustedTimeMS() -> Int64 {
-        let selector = NSSelectorFromString("getServerAdjustedCurrentTimeMS")
-        let sdk: AnyObject = Approov.self
-        if sdk.responds(to: selector), let implementation = sdk.method(for: selector) {
-            typealias ServerAdjustedTime = @convention(c) (AnyObject, Selector) -> Int64
-            let time = unsafeBitCast(implementation, to: ServerAdjustedTime.self)(sdk, selector)
-            if time > 0 {
-                return time
-            }
+        let time = Approov.getServerAdjustedCurrentTimeMS()
+        if time > 0 {
+            return time
         }
         let firstUse = stateLock.withLock { () -> Bool in
             defer { deviceClockWarned = true }

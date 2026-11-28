@@ -6,66 +6,101 @@
 ![Message Signing](https://img.shields.io/badge/Message%20Signing-RFC%209421-1f6feb)
 ![Build](https://github.com/approov/approov-service-ios-swift-asynchttpclient/actions/workflows/build_and_test.yml/badge.svg)
 
-A wrapper for the [Approov SDK](https://github.com/approov/approov-ios-sdk) to enable easy integration when using [`AsyncHTTPClient`](https://github.com/swift-server/async-http-client) for making the API calls that you wish to protect with Approov. In order to use this you will need a trial or paid [Approov](https://www.approov.io) account.
+This package adds [Approov](https://www.approov.io) to an iOS app that uses [`AsyncHTTPClient`](https://github.com/swift-server/async-http-client). After you initialize it, the package adds an Approov token to each request that your app sends to your API domains through an `ApproovHTTPClient`. The token, a signed JWT, provides proof of attestation. Your backend checks it to decide whether to accept or reject the request. A valid token shows that the request came from a genuine, unmodified copy of your app on a device that passed Approov's checks.
 
-This page provides the steps for integrating Approov into your app. Additionally, a step-by-step tutorial guide using our [Shapes App Example](https://github.com/approov/quickstart-ios-swift-asynchttpclient/blob/master/SHAPES-EXAMPLE.md) is also available.
+The package also checks the TLS connection to each of your API domains. A request goes ahead only if both the operating system and the [Managed Trust Roots](https://docs.approov.io/security-configuration/dynamic-pinning/#managed-trust-roots) configuration in your Approov account trust the connection. [Connection validation](ADVANCED.md#connection-validation) has the details.
 
-To follow this guide you should have received an onboarding email for a trial or paid Approov account.
+## BEFORE YOU START
 
-## ADDING APPROOV SERVICE DEPENDENCY
-The Approov integration is available via the [Swift Package Manager](https://www.swift.org/package-manager/). This allows inclusion into the project by adding a dependency on the `ApproovAsyncHTTPClient` package in Xcode. In the search box of the add packages dialog, enter the URL of the git repository `https://github.com/approov/approov-service-ios-swift-asynchttpclient.git` and choose the version you wish to use.
+You need:
 
-The `ApproovAsyncHTTPClient` package is an open-source wrapper layer that allows you to easily use Approov with AsyncHTTPClient. It has a further dependency on the closed-source [`Approov` iOS SDK](https://github.com/approov/approov-ios-sdk).
+* an Approov account, trial or paid, and its [account ID](#your-account-id)
+* your API domains [added to Approov](https://docs.approov.io/getting-started/add-api-domains/). The package adds a token only to requests to these domains.
 
-Once added, import the module wherever you use it:
+Then follow the steps below. Each step makes the next one possible:
+
+1. [Add the dependency](#adding-the-dependency). This gives your app `ApproovService` and `ApproovHTTPClient`.
+2. [Initialize](#initializing) `ApproovService` with your account ID. This turns on Approov protection.
+3. [Make your requests](#making-requests) through an `ApproovHTTPClient`. Your requests to your API domains then carry a token.
+4. [Look in the debug log](ADVANCED.md#diagnostics) to see that each request receives a token.
+5. [Register your app and check tokens on your backend](#next-steps). Until your backend checks the token, your API is not protected.
+
+The [Approov package documentation](https://docs.approov.io/app-integration/packages/overview/) has more background. The [quickstart](https://github.com/approov/quickstart-ios-swift-asynchttpclient) has a step-by-step example app. Optional features are in [ADVANCED.md](ADVANCED.md). Every method is in [REFERENCE.md](REFERENCE.md).
+
+## ADDING THE DEPENDENCY
+
+### Swift Package Manager
+
+In Xcode, choose `File > Add Package Dependencies...`, enter `https://github.com/approov/approov-service-ios-swift-asynchttpclient.git`, choose the dependency rule `Up to Next Major Version` from `3.7.0`, and add the `ApproovAsyncHTTPClient` product to your app target.
+
+In a `Package.swift`, add the package and the product:
 
 ```swift
-import ApproovAsyncHTTPClient
-import Approov
+dependencies: [
+    .package(url: "https://github.com/approov/approov-service-ios-swift-asynchttpclient.git", from: "3.7.0")
+],
+targets: [
+    .target(
+        name: "YourApp",
+        dependencies: [
+            .product(name: "ApproovAsyncHTTPClient", package: "approov-service-ios-swift-asynchttpclient")
+        ]
+    )
+]
 ```
 
-The primary client type is `ApproovHTTPClient`, while `ApproovService` provides lower-level configuration and direct SDK helper methods.
+The package is available only through Swift Package Manager. It supports iOS 13 or later. It depends on the closed-source [Approov iOS SDK](https://github.com/approov/approov-ios-sdk) 3.7.0. It also depends on the [Approov fork of AsyncHTTPClient](https://github.com/approov/async-http-client), which runs the Approov connection check in the TLS handshake.
 
-## INITIALIZING APPROOV SERVICE
-In order to use the `ApproovService` you must initialize it when your app is created, before constructing any `ApproovHTTPClient`. Initialization can fail (bad config, SDK error) and `initialize(config:)` is a throwing call, so wrap it in `do/catch` and make sure your app survives a failure rather than crashing:
+Next, [initialize the package](#initializing).
+
+## INITIALIZING
+
+Initialize `ApproovService` once, when your app starts, with your Approov account ID. Do this before your app sends its first request, for example in `application(_:didFinishLaunchingWithOptions:)`. If your app sends a request through an `ApproovHTTPClient` before `initialize`, the request goes out without Approov protection.
 
 ```swift
 import ApproovAsyncHTTPClient
-import Foundation
-import os
-
-let log = Logger(subsystem: "com.yourcompany.yourapp", category: "approov")
-
-// An app-generated id used to correlate this install/session across your own app logs and
-// your backend. Use a UUID, or any session/user identifier you already have. It is NOT an
-// Approov secret.
-let correlationId = UUID().uuidString
+import os.log
 
 do {
-    try ApproovService.initialize(config: "<enter-your-config-string-here>")
-    // Confirm Approov is actually active before treating it as enabled, then log identifiers
-    // for correlation / observability.
-    if ApproovService.isApproovEnabled() {
-        let deviceID = ApproovService.getDeviceID() ?? "unknown"
-        log.info("Approov initialized; deviceID=\(deviceID, privacy: .public) session=\(correlationId, privacy: .public)")
-    } else {
-        log.notice("Approov initialized in bypass mode (no protection); session=\(correlationId, privacy: .public)")
+    // your Approov account ID, from your onboarding email or "approov sdk -getConfigString"
+    try ApproovService.initialize(config: "<your-approov-account-id>")
+    if ApproovService.isApproovServiceEnabled() && ApproovService.isApproovProtectionEnabled() {
+        os_log("Approov initialized; deviceID=%@", ApproovService.getDeviceID() ?? "")
     }
 } catch {
-    // Initialization failed: log it and continue UNPROTECTED so the app still works.
-    // Re-initializing with an empty config string enters bypass mode (initialized, but no
-    // Approov token injection, pinning, or secret substitution).
-    log.error("Approov init failed (session=\(correlationId, privacy: .public)); continuing unprotected: \(String(describing: error), privacy: .public)")
+    // the value passed was not a valid account ID; run without Approov rather than not at all
+    os_log("Approov account ID rejected; starting in bypass mode: %@", error.localizedDescription)
     try? ApproovService.initialize(config: "")
 }
+// then configure, after initialize (which resets the configuration) and before the
+// app issues protected requests; only the settings your app uses, for example:
+// ApproovService.setTokenHeader(header: "Authorization", prefix: "Bearer ")
+// ApproovService.addSubstitutionHeader(header: "Api-Key", prefix: nil)
 ```
 
-The `<enter-your-config-string-here>` is a custom string that configures your Approov account access. This will have been provided in your Approov onboarding email.
+About this example:
 
-On success the example logs the Approov **device ID** (`getDeviceID()`) and an **app-generated session/correlation id** (a UUID, or any session/user identifier you use) so a given install can be correlated across your app logs, backend, and the Approov [Live Metrics](https://approov.io/docs/latest/approov-usage-documentation/#metrics-graphs). If initialization fails, the example re-initializes with an empty config so the app keeps working. Those requests go out **without Approov protection**, so treat the backend as the enforcement point.
+* `initialize` throws if the account ID is incomplete or changed. The `catch` block then starts the package in **bypass mode**, by initializing with `""`. In bypass mode the package sends requests without Approov protection. You can also use bypass mode as a feature flag: initialize with `""` to start your app without Approov.
+* Logging the installation device ID is optional. Approov identifies an installation only by its device ID. Log it next to your own user or session ID for correlation.
+* Make your configuration calls after `initialize`, before the app sends protected requests. Each `initialize` resets the configuration to its defaults, so the package loses a setting made before it. A setting applies only to requests sent after you make it. See [initialize, then configure](ADVANCED.md#initialize-then-configure).
 
-## USING APPROOV SERVICE
-Once `ApproovService` is initialized, create an `ApproovHTTPClient` and use it as you would the standard `AsyncHTTPClient` `HTTPClient`. The wrapper automatically applies Approov token fetching, secure string substitution, and dynamic pinning to the requests it processes:
+### Your account ID
+
+Your account ID is in your onboarding email. The Approov CLI also shows it at any time, and calls it the SDK config string:
+
+```sh
+approov sdk -getConfigString
+```
+
+The account ID is the same for every app in your account, and it is not a secret. You can keep it in your source code or deliver it with your app's configuration. The whole value must reach the app unchanged, including its punctuation. See [about the Approov account ID](ADVANCED.md#about-the-approov-account-id).
+
+If the account ID is not available when the app starts, initialize with `""` first. Call `initialize` again when you have the account ID. See [bypass initialization](ADVANCED.md#bypass-initialization).
+
+When the package is initialized, [make your requests](#making-requests) through an `ApproovHTTPClient`.
+
+## MAKING REQUESTS
+
+Use an `ApproovHTTPClient` wherever you would create an `HTTPClient`:
 
 ```swift
 import ApproovAsyncHTTPClient
@@ -73,50 +108,44 @@ import AsyncHTTPClient
 
 let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
 
-// Perform a request: the Approov-Token header, substitutions, and pinning are applied automatically.
-let response = try client.get(url: "https://api.example.com/hello").wait()
+let request = HTTPClientRequest(url: "https://api.example.com/shapes")
+let response = try await client.execute(request, timeout: .seconds(30))
 print(response.status)
-
-try client.syncShutdown()
 ```
 
-For API domains that are configured to be protected with an Approov token, this adds the `Approov-Token` header and pins the connection. This may also substitute header values when using secrets protection. Unprotected and excluded domains are forwarded unchanged.
+`ApproovHTTPClient` has the request methods of `HTTPClient`: `get`, `post`, `patch`, `put`, `delete`, and the `execute` functions in their future, delegate and `async` forms. When your app no longer needs the client, shut it down with `syncShutdown()` or `shutdown(queue:_:)`, as you do for an `HTTPClient`.
 
-Create the client with `.createNew`, or with a shared `NIOTSEventLoopGroup`. Keep TLS certificate verification at `.fullVerification`, and do not set a proxy. The package can validate the connection only in that configuration. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. See [connection validation](USAGE.md#connection-validation).
+Create the client with `.createNew`, or with a shared `NIOTSEventLoopGroup`. Keep TLS certificate verification at `.fullVerification`, and do not set a proxy. The package can check the connection only in that configuration. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. See [connection validation](ADVANCED.md#connection-validation).
 
-### Error Messages
-The `ApproovService` functions may throw an `ApproovError` to provide additional information:
+For a transport that owns its own `HTTPClient`, call `ApproovService.signRequest(_:)`, which returns a protected copy of an `HTTPClient.Request`. `ApproovService.updateRequestWithApproov(request:)` does the same for an `ApproovRequest` and returns the decision. Give that client `.disallow` as its `redirectConfiguration`, because a plain `HTTPClient` follows a redirect with the protection of the first request. These methods do not check the connection. Both are in [REFERENCE.md](REFERENCE.md).
 
-* `permanentError`: Feature is not enabled or a configuration feature is unsupported.
-* `rejectionError`: Attestation has been rejected. The `ARC` and `rejectionReasons` may contain specific device information that would help troubleshooting.
-* `networkingError`: Generally can be retried since it is a temporary network issue.
-* `pinningError`: Certificate pinning validation error.
-* `configurationError`: Configuration feature is disabled or wrongly configured (e.g. attempting to initialize with a different configuration from a previous initialization).
-* `initializationFailure`: ApproovService failed to initialize.
+## CUSTOMIZING THE BEHAVIOUR
 
-## CHECKING IT WORKS
-Initially you won't have set which API domains to protect, so the wrapper will not add anything. It will have called Approov though and made contact with the Approov cloud service. You will see logging from Approov saying `UNKNOWN_URL`.
+[ADVANCED.md](ADVANCED.md) explains how the package behaves and how to customize it:
 
-Your Approov onboarding email should contain a link allowing you to access [Live Metrics Graphs](https://approov.io/docs/latest/approov-usage-documentation/#metrics-graphs). After you've run your app with Approov integration you should be able to see the results in the live metrics within a minute or so. At this stage you could even release your app to get details of your app population and the attributes of the devices they are running upon.
+* [What each request carries](ADVANCED.md#what-each-request-carries), and [what happens when a token fetch fails](ADVANCED.md#what-happens-by-default). By default, a request fails if the device has a network problem. It goes ahead with an empty token header if the app cannot reach the Approov service.
+* [Service mutators](ADVANCED.md#service-mutators), which change those decisions. For example, a mutator can send requests without a valid token. It can also fail a request on chosen errors. Your app then receives the `URLError` that the mutator throws and decides what to do, for example retry or show a message.
+* [Message signing](ADVANCED.md#message-signing), which you install with one call, for example `ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED)`
+* [Header names](ADVANCED.md#header-names), [secure strings](ADVANCED.md#secure-strings), [token binding](ADVANCED.md#token-binding), [excluding URLs](ADVANCED.md#excluding-urls) and [redirects](ADVANCED.md#redirects)
+* [Diagnostics](ADVANCED.md#diagnostics), which show the result of each token fetch in the log
+
+Then continue with the [next steps](#next-steps).
 
 ## NEXT STEPS
-To actually protect your APIs and/or secrets there are some further steps. Approov provides two different options for protection:
 
-* [API PROTECTION](https://github.com/approov/quickstart-ios-swift-asynchttpclient/blob/master/API-PROTECTION.md): You should use this if you control the backend API(s) being protected and are able to modify them to ensure that a valid Approov token is being passed by the app. An [Approov Token](https://approov.io/docs/latest/approov-usage-documentation/#approov-tokens) is a short-lived cryptographically signed JWT proving the authenticity of the call.
+1. [Register your app's signing certificate](https://docs.approov.io/getting-started/add-app-signing-certificates/), so that your release builds pass attestation.
+2. [Check tokens on your backend](https://docs.approov.io/getting-started/integrate-backend/), and signatures if you installed message signing. This is the step that protects your API.
+3. [Go live](https://docs.approov.io/getting-started/go-live/). Monitor first, then let your backend reject requests without a valid token.
 
-* [SECRETS PROTECTION](https://github.com/approov/quickstart-ios-swift-asynchttpclient/blob/master/SECRETS-PROTECTION.md): This allows app secrets, including API keys for 3rd party services, to be protected so that they no longer need to be included in the released app code. These secrets are only made available to valid apps at runtime.
+## UPGRADING FROM 3.5.x
 
-Note that it is possible to use both approaches side-by-side in the same app.
+Read the [changelog](CHANGELOG.md) for the full list of changes. Test your app and backend together.
 
----
+### Code changes
 
-## Useful Links
+These changes came in 3.5.4. An app that already uses 3.5.4 needs no source change for 3.7.0.
 
-- [Approov SDK](https://github.com/approov/approov-ios-sdk)
-- [AsyncHTTPClient Documentation](https://github.com/swift-server/async-http-client)
-- [Approov Website](https://www.approov.io)
-- [Quickstart Guide](https://github.com/approov/quickstart-ios-swift-asynchttpclient)
-- [Shapes App Example](https://github.com/approov/quickstart-ios-swift-asynchttpclient/blob/master/SHAPES-EXAMPLE.md)
-- [Changelog](CHANGELOG.md)
-- [Reference Documentation](REFERENCE.md)
-- [Usage Guide](USAGE.md)
+* `getDeviceID()` returns `String?` and no longer throws. Remove the `try` and handle `nil`.
+* `prefetch()` and `proceedOnNetworkFail` are removed. To send requests after a network failure, use `setServiceMutator(.ALWAYS_PROCEED)`.
+* `substituteQueryParam(url:queryParameter:)` is removed. Call `addSubstitutionQueryParam(key:)` once, and the package substitutes the parameter in each request.
+* While Approov is enabled, `ApproovHTTPClient` refuses each request with `URLError(.unknown)` when it cannot check the connection. This applies to an event loop group that is not a `NIOTSEventLoopGroup`, a `delegateAndChannel` event loop that is not a NIOTS loop, TLS without `.fullVerification`, or a proxy. See [connection validation](ADVANCED.md#connection-validation).

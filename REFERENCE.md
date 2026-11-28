@@ -25,7 +25,7 @@ The native SDK (3.5+) accepts a same-config re-initialization by returning `fals
 try ApproovService.initialize(config: "<config-string>")
 ```
 
-An optional `comment` parameter is forwarded directly to the native SDK. The `comment` should be `nil` unless you are using SDK initialization options or performing an explicit SDK reinitialization (e.g. `"options:no-install-key"` or `"reinit"`).
+The package passes the optional `comment` to Approov for [initialization options](https://docs.approov.io/direct-sdk-integration/initialization-options/#sdk-initialization-options). Keep it `nil` otherwise.
 
 ```swift
 try ApproovService.initialize(config: "<config-string>", comment: "options:no-install-key")
@@ -350,7 +350,7 @@ Creates an instance of `ApproovHTTPClient`.
 let client = ApproovHTTPClient(eventLoopGroupProvider: .createNew)
 ```
 
-Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`. Keep `certificateVerification` at `.fullVerification`, and do not set a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](USAGE.md#connection-validation) and [redirects](USAGE.md#redirects).
+Use `.createNew`, or `.shared` with a `NIOTSEventLoopGroup`. Keep `certificateVerification` at `.fullVerification`, and do not set a proxy. While Approov is enabled, the client refuses each request with `URLError(.unknown)` in any other configuration. The client follows redirects with `configuration.redirectConfiguration`. See [connection validation](ADVANCED.md#connection-validation) and [redirects](ADVANCED.md#redirects).
 
 ### get / post / patch / put / delete
 Convenience HTTP verbs returning `EventLoopFuture<HTTPClient.Response>`.
@@ -369,9 +369,11 @@ try client.syncShutdown()
 
 ## ApproovDefaultMessageSigning
 
-A service mutator that signs requests that carry the Approov token header. See [message signing](USAGE.md#message-signing).
+A service mutator that signs requests that carry the Approov token header. See [message signing](ADVANCED.md#message-signing).
 
-- `init()`: creates a signer with no factory.
+- `init()`: creates a signer with no factory. It makes the `CLOSE_FAILURE` decisions.
+- `combined()`: returns a new signer whose default factory adds both the install and the account signature. It makes the `.DEFAULT` decisions. Install it with `setServiceMutator`.
+- `combined(decisions:)`: as `combined()`, but it makes the decisions of `decisions`, for example `.CLOSE_FAILURE` or `.ALWAYS_PROCEED`. Each call returns a new signer.
 - `setDefaultFactory(_:)`: the factory for each protected host without its own factory.
 - `putHostFactory(hostName:factory:)`: the factory for one host.
 - `generateDefaultSignatureParametersFactory(baseParametersOverride:)`: a factory with the default settings: install signature, `created`, a 15 second `expires`, and a SHA-256 body digest.
