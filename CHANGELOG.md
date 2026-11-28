@@ -9,6 +9,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Changed
 - Uses Approov iOS SDK 3.7.0. The minimum iOS version stays 13.0.
 - The package logs a missing install or account signature as a warning once per process. It logs a request sent unsigned as an error once per process. It logs later occurrences at debug level.
+- The package leaves a value that is not a secure string key (`UNKNOWN_KEY`) as your app wrote it, as in 3.5.3. Other failed secure string fetches still write the status name in place of the placeholder. See [secure strings](ADVANCED.md#secure-strings).
+- The error for a failed token fetch, and the log lines, show the URL without user info, query, fragment or a default port.
 
 ### Added
 - `ApproovDefaultMessageSigning.combined()` and `combined(decisions:)` give a signer that adds both the install and the account signature and makes the decisions you pass, for example `ApproovDefaultMessageSigning.combined(decisions: .ALWAYS_PROCEED)`. See [message signing](ADVANCED.md#sign-with-other-decisions).
