@@ -324,10 +324,10 @@ public extension ApproovServiceMutator {
             if ApproovService.getUseApproovStatusIfNoToken() {
                 return true
             }
-            throw ApproovStandardDecisions.made(.networkingError(message: "Approov token fetch for \(url): " +
+            throw ApproovStandardDecisions.made(.networkingError(message: "Approov token fetch for \(ApproovService.loggableURL(url)): " +
                                                                  ApproovService.statusName(status)))
         default:
-            throw ApproovStandardDecisions.made(.permanentError(message: "Approov token fetch for \(url): " +
+            throw ApproovStandardDecisions.made(.permanentError(message: "Approov token fetch for \(ApproovService.loggableURL(url)): " +
                                                                 ApproovService.statusName(status)))
         }
     }
@@ -393,7 +393,7 @@ public extension ApproovServiceMutator where Self == ApproovAlwaysProceedMutator
     static var ALWAYS_PROCEED: ApproovAlwaysProceedMutator { ApproovAlwaysProceedMutator.instance }
 }
 
-@available(*, deprecated, message: "Use ApproovCloseFailureMutator.DEFAULT or .CLOSE_FAILURE.")
+@available(*, deprecated, message: "Use .DEFAULT or .CLOSE_FAILURE, for example ApproovService.setServiceMutator(.CLOSE_FAILURE).")
 public struct ApproovServiceMutatorDefault: ApproovServiceMutator, CustomStringConvertible {
     public static let shared = ApproovServiceMutatorDefault()
     public var description: String { "ApproovServiceMutator.DEFAULT" }

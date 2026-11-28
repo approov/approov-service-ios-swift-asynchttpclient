@@ -3015,3 +3015,35 @@ extension ApproovServiceMiniSDKTests {
         }
     }
 }
+
+// MARK: - Status names and the URL in errors
+
+extension ApproovServiceMiniSDKTests {
+    func testTheTokenFailureShowsTheURLWithoutUserInfoQueryOrFragment() throws {
+        try reinitializeServiceWithTargetHost()
+        let host = try XCTUnwrap(URL(string: targetURLString)?.host)
+        let url = "https://user:password@\(host):8443/v1/items?api_key=query-secret#part"
+        let network = try decide(url, tokenStatus: "NO_NETWORK")
+        XCTAssertEqual(network.error?.localizedDescription, "Approov token fetch for https://\(host):8443/v1/items: NO_NETWORK")
+        let rejected = try decide(url, tokenStatus: "REJECTED")
+        XCTAssertEqual(rejected.error?.localizedDescription, "Approov token fetch for https://\(host):8443/v1/items: REJECTED")
+    }
+
+    func testTheLoggableURLKeepsOnlySchemeHostPortAndPath() {
+        XCTAssertEqual(ApproovService.loggableURL("https://u:p@Example.com:443/a/b?k=v#f"), "https://Example.com/a/b")
+        XCTAssertEqual(ApproovService.loggableURL("http://example.com:8080/a%20b?k=v"), "http://example.com:8080/a%20b")
+        XCTAssertEqual(ApproovService.loggableURL("https://[::1]:8443/p?k=v"), "https://[::1]:8443/p")
+        XCTAssertEqual(ApproovService.loggableURL("ftp://example.com/a?k=v"), "(URL not shown)")
+        XCTAssertEqual(ApproovService.loggableURL("not a url ?k=v"), "(URL not shown)")
+    }
+
+    func testTheDocumentedFormsCompile() {
+        // the forms the deprecation message, CHANGELOG and USAGE give
+        ApproovService.setServiceMutator(.DEFAULT)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.CLOSE_FAILURE")
+        ApproovService.setServiceMutator(.CLOSE_FAILURE)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.CLOSE_FAILURE")
+        ApproovService.setServiceMutator(.ALWAYS_PROCEED)
+        XCTAssertEqual(String(describing: ApproovService.getServiceMutator()), "ApproovServiceMutator.ALWAYS_PROCEED")
+    }
+}

@@ -192,16 +192,32 @@ public class ApproovService {
     }
 
     /**
-     * Gets the form of a URL for a log line: scheme, host, port and path. It has no user info, query or
-     * fragment.
+     * Gets the form of a URL that may be logged or put in an error message: scheme, host, any port that is not
+     * the default for the scheme, and path, without the user info, query or fragment, which may carry personal
+     * data or a secure string. A string that is not an http or https URL is not shown.
+     *
+     * @param url is the URL string
+     * @return the loggable form of the URL
      */
-    static func loggableURL(_ url: URL) -> String {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let scheme = components.scheme, let host = components.host else {
-            return "<url>"
+    static func loggableURL(_ url: String) -> String {
+        guard var components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty else {
+            return "(URL not shown)"
         }
-        let port = components.port.map { ":\($0)" } ?? ""
-        return "\(scheme)://\(host)\(port)\(components.percentEncodedPath)"
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        if components.port == (scheme == "https" ? 443 : 80) {
+            components.port = nil
+        }
+        return components.string ?? "(URL not shown)"
+    }
+
+    /** The loggable form of a URL, as loggableURL(_: String) gives it. */
+    static func loggableURL(_ url: URL) -> String {
+        return loggableURL(url.absoluteString)
     }
 
     /**
